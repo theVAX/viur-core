@@ -768,10 +768,11 @@ class User(ConfigType):
 
     google_gsuite_domains: list[str] = []
     """A list of domains. When a user signs in for the first time with a
-    Google account using Google OAuth sign-in, and the user's email address
-    belongs to one of the listed domains, a user account (UserSkel) is created.
-    If the user's email address belongs to any other domain,
-    no account is created."""
+    Google account using Google OAuth sign-in, and the account's hosted domain
+    (the "hd" claim of the ID token, set for Google Workspace accounts only)
+    is one of the listed domains, a user account (UserSkel) is created.
+    For any other account, including one whose email address merely ends
+    with a listed domain, no account is created."""
 
     redirect_whitelist: list[str] | t.Callable[[], list[str]] = (
         lambda _: ["http://localhost:*", f"https://*{_project_id}.appspot.com*"]

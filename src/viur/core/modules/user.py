@@ -716,6 +716,10 @@ class GoogleAccount(UserPrimaryAuthentication):
         if user_info["iss"] not in {"accounts.google.com", "https://accounts.google.com"}:
             raise ValueError("Invalid issuer")
 
+        # An unverified address may belong to someone else; it must neither find, create nor rename a user.
+        if user_info.get("email_verified") is not True:
+            raise errors.Forbidden("The e-mail address of this Google account is not verified")
+
         # Token looks valid :)
         uid = user_info["sub"]
         email = user_info["email"]
