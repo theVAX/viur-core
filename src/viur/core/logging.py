@@ -145,8 +145,9 @@ logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
 
 # pymongo logs every command, server selection and connection event on DEBUG. To see them again, set the
-# respective logger, e.g. logging.getLogger("pymongo.command").setLevel(logging.DEBUG), after importing viur.core.
-logging.getLogger("pymongo").setLevel(logging.WARNING)
+# "pymongo" logger (or one of its children, e.g. "pymongo.command") to DEBUG after importing viur.core.
+if (pymongo_logger := logging.getLogger("pymongo")).level == logging.NOTSET:
+    pymongo_logger.setLevel(logging.WARNING)
 
 # Calling getLogger(name) ensures that any placeholder loggers held by loggerDict are fully initialized
 # (https://stackoverflow.com/a/53250066)
@@ -154,6 +155,8 @@ for name, level in {
     k: v.getEffectiveLevel()
     for k, v in logging.root.manager.loggerDict.items()
     if isinstance(v, logging.Logger)
+    # pymongo's children keep following the "pymongo" logger unless the app set their level itself
+    and not (k.startswith("pymongo.") and v.level == logging.NOTSET)
 }.items():
     logging.getLogger(name).setLevel(level)
 
