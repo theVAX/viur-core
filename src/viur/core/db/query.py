@@ -71,23 +71,18 @@ def _entryMatchesQuery(
             return True
         return False
 
-    for filterStr, filterValue in singleFilter.items():
-        field, opcode = filterStr.split(" ")
-        entryValue = entry.get(field)
-        # Several bounds with the same range operator arrive as a list, see utils.to_mongo_filter.
-        bounds = filterValue if opcode in utils._INEQUALITY_OPS and isinstance(filterValue, list) else [filterValue]
-        if not all(doesMatch(entryValue, bound, opcode) for bound in bounds):
-            return False
+    def matchesCondition(filterStr: str, filterValue: t.Any) -> bool:
+        field, opcode = filterStr.split(" ", 1)
+        # Several ``=`` or several bounds with the same range operator arrive as a list and mean AND, see
+        # utils.to_mongo_filter (``$all`` for ``=``); an empty list matches nothing there.
+        if isinstance(filterValue, list) and (opcode == "=" or opcode in utils._INEQUALITY_OPS):
+            return bool(filterValue) and all(doesMatch(entry.get(field), v, opcode) for v in filterValue)
+        return doesMatch(entry.get(field), filterValue, opcode)
 
-    if or_filters:
-        for or_group in or_filters:
-            if not any(
-                doesMatch(entry.get(fs.split(" ", 1)[0]), v, fs.split(" ", 1)[1])
-                for fs, v in or_group
-            ):
-                return False
-
-    return True
+    if not all(matchesCondition(filterStr, filterValue) for filterStr, filterValue in singleFilter.items()):
+        return False
+    # OR inside a group, AND between the groups
+    return all(any(matchesCondition(fs, v) for fs, v in or_group) for or_group in or_filters or [])
 
 
 _ORDER_FAMILY: t.Final[dict[SortOrder, int]] = {
