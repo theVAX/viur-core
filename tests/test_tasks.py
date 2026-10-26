@@ -51,6 +51,110 @@ class TestCallDeferredDirectCall(ViURTestCase):
         request.pendingTasks.append.assert_not_called()
 
 
+class TestDeferWithoutQueueRegion(ViURTestCase):
+    """Without a queue region a deferred call inside a request becomes a pending task of that request.
+
+    Only the development server runs pending tasks after the response, so anywhere else the task would be lost.
+    """
+
+    _decorated_task = TestCallDeferredDirectCall._decorated_task
+
+    def _request(self) -> mock.MagicMock:
+        from viur.core import current
+
+        request = mock.MagicMock()
+        request.request.headers = {}
+        token = current.request.set(request)
+        self.addCleanup(current.request.reset, token)
+        return request
+
+    def test_development_server_keeps_the_task_for_after_the_request(self):
+        from viur.core import conf
+
+        tasks, record_call, calls = self._decorated_task()
+        request = self._request()
+        with mock.patch.object(tasks, "queueRegion", None), \
+                mock.patch.object(type(conf.instance), "is_dev_server", True):
+            record_call("c")
+
+        self.assertEqual([], calls)
+        request.pendingTasks.append.assert_called_once()
+
+    def test_elsewhere_the_call_fails_instead_of_losing_the_task(self):
+        from viur.core import conf
+
+        tasks, record_call, calls = self._decorated_task()
+        request = self._request()
+        with mock.patch.object(tasks, "queueRegion", None), \
+                mock.patch.object(type(conf.instance), "is_dev_server", False):
+            with self.assertRaisesRegex(RuntimeError, "VIUR_TASKS_REGION"):
+                record_call("d")
+
+        self.assertEqual([], calls)
+        request.pendingTasks.append.assert_not_called()
+
+    def test_query_iter_step_fails_instead_of_losing_the_task(self):
+        from viur.core import conf
+
+        tasks = self._decorated_task()[0]
+        request = self._request()
+        with mock.patch.object(tasks, "queueRegion", None), \
+                mock.patch.object(type(conf.instance), "is_dev_server", False):
+            with self.assertRaisesRegex(RuntimeError, "VIUR_TASKS_REGION"):
+                tasks.QueryIter._requeueStep({})
+
+        request.pendingTasks.append.assert_not_called()
+
+
+class TestCronKeepsFailedPeriodicTasks(ViURTestCase):
+    """A periodic task whose call fails must run again on the next cron request, not after its interval."""
+
+    _decorated_task = TestCallDeferredDirectCall._decorated_task
+
+    def test_failed_enqueue_is_retried_on_the_next_cron(self):
+        import datetime
+        from viur.core import conf, current, errors
+
+        tasks, record_call, calls = self._decorated_task()
+
+        def nightly():
+            record_call("e")  # deferred from the cron request
+
+        nightly.periodicTaskName = "test_nightly"
+
+        request = mock.MagicMock()
+        request.request.headers = {}
+        token = current.request.set(request)
+        self.addCleanup(current.request.reset, token)
+
+        stored = {}
+        handler = mock.Mock()
+        handler.canCron.return_value = True
+        handler.findBoundTask.return_value = None
+        task_client = mock.Mock()
+        task_client.queue_path.return_value = "projects/test-project/locations/europe-west3/queues/default"
+        for patch in (
+            mock.patch.dict(tasks._periodicTasks, {"test-cron": {nightly: datetime.timedelta(hours=1)}}),
+            mock.patch.object(tasks.db, "get", lambda kind, key: stored.get((kind, key))),
+            mock.patch.object(tasks.db, "put", lambda kind, entry: stored.__setitem__((kind, entry["_id"]), entry)),
+            mock.patch.object(tasks, "taskClient", task_client),
+            mock.patch.object(type(conf.instance), "is_dev_server", False),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+        with mock.patch.object(tasks, "queueRegion", None):
+            with self.assertRaises(errors.InternalServerError):
+                tasks.TaskHandler.cron._func(handler, "test-cron")
+        self.assertEqual({}, stored, "the failed call was recorded as done")
+
+        with mock.patch.object(tasks, "queueRegion", "europe-west3"):
+            tasks.TaskHandler.cron._func(handler, "test-cron")
+        task_client.create_task.assert_called_once()
+        self.assertIn(("viur-task-interval", "test_nightly"), stored)
+        self.assertEqual([], calls)
+
+
 class TestRetryNTimesNotification(ViURTestCase):
     """The "task failed permanently" mail must actually be sent.
 

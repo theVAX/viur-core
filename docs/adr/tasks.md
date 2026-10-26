@@ -40,7 +40,12 @@ status: accepted
 - Without a `queueRegion` (local dev without `TASKS_EMULATOR`) and without an
   explicit `_call_deferred`, tasks run inline: appended to `req.pendingTasks`
   and executed after the response - or immediately when there is no request
-  (warmup). Behaviour differs from production.
+  (warmup). Behaviour differs from production. Only the development server
+  runs `pendingTasks`, so anywhere else a deferred call inside a request
+  raises `RuntimeError` instead of losing the task.
+- On App Engine the region comes from the metadata server (3 s timeout).
+  If that fails, `VIUR_TASKS_REGION` is used, then a guess from the
+  application id prefix (`h~`, `e~`); otherwise the region stays unknown.
 - Inside a task request the first `@CallDeferred` call runs directly instead
   of being queued: `_call_deferred` is cleared while
   `X-Appengine-Taskretrycount` is set and `DEFERRED_TASK_CALLED` is not yet
@@ -48,6 +53,9 @@ status: accepted
   executed at all - and why every *further* deferred call in the same request
   is queued again, including a `super()` call from an override.
 - A deferred call always returns `None`. Never use its return value.
+- A periodic task whose call raises (including a failed enqueue) does not get
+  its last-call timestamp: it runs again on the next cron request. The other
+  periodic tasks still run, then the cron request answers 500.
 - Calling a `@CallDeferred` super method from a `@CallDeferred` override
   defers twice; pass `_call_deferred=False`.
 - Deferring inside a transaction is handled for you: a transaction marker is

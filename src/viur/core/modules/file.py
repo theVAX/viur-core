@@ -55,7 +55,9 @@ PRIVATE_BUCKET_NAME = f"""{_PROJECT_ID}.appspot.com"""
 PUBLIC_BUCKET_NAME = f"""public-dot-{_PROJECT_ID}"""
 PUBLIC_DLKEY_SUFFIX = "_pub"
 
-_private_bucket = GOOGLE_STORAGE_CLIENT.lookup_bucket(PRIVATE_BUCKET_NAME)
+# bucket() makes no request. If the bucket is missing, blob lookups find nothing (download answers 410 Gone,
+# the thumbnailer skips the file) and uploads, reads and listings raise google.api_core.exceptions.NotFound.
+_private_bucket = GOOGLE_STORAGE_CLIENT.bucket(PRIVATE_BUCKET_NAME)
 _public_bucket = None
 
 # FilePath is a descriptor for ViUR file components

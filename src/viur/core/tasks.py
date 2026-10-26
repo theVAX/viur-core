@@ -52,7 +52,14 @@ if _gaeApp:
 
     try:
         headers = {"Metadata-Flavor": "Google"}
-        r = requests.get("http://metadata.google.internal/computeMetadata/v1/instance/region", headers=headers)
+        r = requests.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/region",
+            headers=headers,
+            # Bounds connecting and each wait for data (3 s, like google-auth's metadata requests), not the
+            # whole call; without it a hanging metadata server blocks the import.
+            timeout=3,
+        )
+        r.raise_for_status()
         # r.text should be look like this "projects/(project-number)/region/(region)"
         # like so "projects/1234567890/region/europe-west3"
         queueRegion = r.text.split("/")[-1]
@@ -63,7 +70,15 @@ if _gaeApp:
             "h": "europe-west3",
             "e": "europe-west1"
         }
-        queueRegion = regionMap.get(regionPrefix)
+        # An explicitly configured region is more reliable than guessing from the application id prefix.
+        queueRegion = os.getenv("VIUR_TASKS_REGION") or regionMap.get(regionPrefix)
+
+# Raised where a task would otherwise be kept for the end of a request that only the development server runs.
+_QUEUE_REGION_UNKNOWN = (
+    "Cannot defer the task: the Cloud Tasks region is unknown. On App Engine, set the environment variable "
+    "VIUR_TASKS_REGION for when the metadata server does not answer. Outside the development server, a task kept "
+    "for the end of the request would be lost."
+)
 
 if not queueRegion and conf.instance.is_dev_server and os.getenv("TASKS_EMULATOR") is None:
     # Probably local development server
@@ -270,6 +285,7 @@ class TaskHandler(Module):
         # We must defer from cron, as tasks will interpret it as a call originating from task-queue - causing deferred
         # functions to be called directly, wich causes calls with _countdown etc set to fail.
         req.DEFERRED_TASK_CALLED = True
+        failed = []
         for task, interval in _periodicTasks[cronName].items():  # Call all periodic tasks bound to that queue
             periodicTaskName = task.periodicTaskName.lower()
             if interval:  # Ensure this task doesn't get called to often
@@ -286,13 +302,17 @@ class TaskHandler(Module):
             except Exception as e:
                 logging.error(f"Error calling periodic task {periodicTaskName}")
                 logging.exception(e)
+                failed.append(periodicTaskName)
             else:
                 logging.debug(f"Successfully called task {periodicTaskName}")
-            if interval:
-                # Update its last-call timestamp
-                entry = {"_id": periodicTaskName, "date": utils.utcNow()}
-                db.put("viur-task-interval", entry)
+                if interval:
+                    # Update its last-call timestamp; a failed task is tried again on the next cron request
+                    entry = {"_id": periodicTaskName, "date": utils.utcNow()}
+                    db.put("viur-task-interval", entry)
         logging.debug("Periodic tasks complete")
+        if failed:
+            # The other periodic tasks have run; fail the cron request so the failure is visible
+            raise errors.InternalServerError(f"Periodic tasks failed: {', '.join(failed)}")
 
     def _is_valid_request(
         self,
@@ -583,7 +603,9 @@ def CallDeferred(func: t.Callable) -> t.Callable:
                     return func(self, *args, **kwargs)
 
             if req:
-                req.pendingTasks.append(task)  # This property only exists on development server!
+                if not conf.instance.is_dev_server:
+                    raise RuntimeError(_QUEUE_REGION_UNKNOWN)
+                req.pendingTasks.append(task)  # Only the development server runs these after the request
             else:
                 # Warmup request or something - we have to call it now as we can't defer it :/
                 task()
@@ -829,10 +851,10 @@ class QueryIter(object, metaclass=MetaQueryIter):
         """
         if not queueRegion:  # Run tasks inline - hopefully development server
             req = current.request.get()
-            task = lambda *args, **kwargs: cls._qryStep(qryDict)
-            if req:
-                req.pendingTasks.append(task)  # < This property will be only exist on development server!
-                return
+            if not (req and conf.instance.is_dev_server):
+                raise RuntimeError(_QUEUE_REGION_UNKNOWN)
+            req.pendingTasks.append(lambda *args, **kwargs: cls._qryStep(qryDict))  # Run after the request
+            return
         taskClient.create_task(tasks_v2.CreateTaskRequest(
             parent=taskClient.queue_path(conf.instance.project_id, queueRegion, cls.queueName),
             task=tasks_v2.Task(
