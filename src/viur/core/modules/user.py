@@ -1054,13 +1054,12 @@ class TimeBasedOTP(UserSecondFactorAuthentication):
             :param idx: How many steps before/behind was that token
         """
         if user_skel := self._user_module.skel().read(user_key):
-            if otp_skel := self._get_otptoken(user_skel):
-                otp_skel.patch(
-                    {
-                        "+otp_timedrift": min(max(0.1 * idx, -0.3), 0.3)
-                    },
-                    update_relations=False,
-                )
+            user_skel.patch(
+                {
+                    "+otp_timedrift": min(max(0.1 * idx, -0.3), 0.3)
+                },
+                update_relations=False,
+            )
 
     def canStart(self, skel: None) -> bool:
         """Access control function for :func:`start`; open, as it requires a passed primary authentication."""
