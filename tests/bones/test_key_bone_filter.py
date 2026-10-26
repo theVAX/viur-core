@@ -27,8 +27,8 @@ class TestKeyListKeepsRestriction(ViURTestCase):
                          [qd.filters["_id ="] for qd in query.queries])
 
     def test_a_key_list_keeps_an_id_in_restriction(self):
-        """Both conditions stay in every sub-query; ``to_mongo_filter`` ANDs ``=`` with ``IN`` only together with
-        fix/db-filter-operators (V-037), before that the ``IN`` is lost on the way to MongoDB."""
+        """Both conditions stay side by side in every sub-query; the key bone must not merge or drop either, the
+        translation into one Mongo condition is left to ``to_mongo_filter``."""
         from viur.core import db
         query = db.Query("thing", _skel()).filter("_id IN", ["allowed"])
         query.mergeExternalFilter({"key": ["forbidden"]})
