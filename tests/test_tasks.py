@@ -102,3 +102,130 @@ class TestRetryNTimesNotification(ViURTestCase):
         self.assertEqual("admin@example.com", kwargs["dests"])
         self.assertEqual("always_fails", kwargs["func_name"])
         self.assertEqual(3, kwargs["retries"])
+
+
+class TestApplyIndexesDeferred(ViURTestCase):
+    """The deferred index build must end, not be retried by the task queue forever.
+
+    An exception leaving a deferred task becomes a 500, and the task queue retries it - without
+    ``retry_parameters`` in ``queue.yaml`` without limit.
+    """
+
+    def test_a_failure_ends_the_task(self):
+        from viur.core import tasks
+        from viur.core.db import indexes
+
+        with (
+            mock.patch.object(indexes, "apply", side_effect=ConnectionError("listIndexes failed")),
+            self.assertLogs(level="ERROR") as logs,
+            self.assertRaises(tasks.PermanentTaskFailure),
+        ):
+            tasks.apply_indexes_deferred.__wrapped__()
+        self.assertIn("listIndexes failed", "\n".join(logs.output))
+
+    def test_the_run_has_a_time_budget(self):
+        from viur.core import tasks
+        from viur.core.db import indexes
+
+        with (
+            mock.patch.object(indexes, "apply", return_value=[]) as apply,
+            mock.patch.object(indexes, "missing", return_value={}),
+        ):
+            tasks.apply_indexes_deferred.__wrapped__("thing")
+        apply.assert_called_once_with("thing", time_budget=tasks._INDEX_TIME_BUDGET)
+
+    def test_queues_itself_again_while_it_makes_progress(self):
+        from viur.core import tasks
+        from viur.core.db import indexes
+
+        run = tasks.apply_indexes_deferred.__wrapped__
+        with (
+            mock.patch.object(indexes, "apply", return_value=[("thing", "a_1__id_1", 75.0)]),
+            mock.patch.object(indexes, "missing", return_value={"thing": [(("b", 1), ("_id", 1))]}),
+            mock.patch.object(tasks, "apply_indexes_deferred") as requeue,
+        ):
+            run()
+        requeue.assert_called_once_with(None)
+
+    def test_a_run_without_progress_ends_the_chain(self):
+        """Without the permission to create indexes every run would fail the same way."""
+        from viur.core import tasks
+        from viur.core.db import indexes
+
+        run = tasks.apply_indexes_deferred.__wrapped__
+        with (
+            mock.patch.object(indexes, "apply", return_value=[]),
+            mock.patch.object(indexes, "missing", return_value={"thing": [(("b", 1), ("_id", 1))]}),
+            mock.patch.object(tasks, "apply_indexes_deferred") as requeue,
+        ):
+            run()
+        requeue.assert_not_called()
+
+
+class TestIndexesApply(ViURTestCase):
+    """``db.indexes.apply`` builds what it can and keeps to its time budget."""
+
+    SPEC_A = (("a", 1), ("_id", 1))
+    SPEC_B = (("b", 1), ("_id", 1))
+
+    def test_a_kind_whose_indexes_cannot_be_listed_does_not_stop_the_others(self):
+        from viur.core.db import indexes, transport
+
+        def existing(kind):
+            if kind == "broken":
+                raise ConnectionError("listIndexes failed")
+            return []
+
+        collection = mock.MagicMock()
+        collection.create_index.return_value = "b_1__id_1"
+        with (
+            mock.patch.object(indexes, "declared", return_value={"broken": [self.SPEC_A], "fine": [self.SPEC_B]}),
+            mock.patch.object(indexes, "existing", side_effect=existing),
+            mock.patch.object(transport, "get_collection", return_value=collection),
+            self.assertLogs(level="ERROR") as logs,
+        ):
+            done = indexes.apply()
+
+        self.assertEqual([("fine", "b_1__id_1")], [(kind, name) for kind, name, _ in done])
+        collection.create_index.assert_called_once_with(list(self.SPEC_B))
+        self.assertIn("broken", "\n".join(logs.output))
+
+    def test_the_time_budget_covers_the_inventory(self):
+        from viur.core.db import indexes, transport
+
+        clock = [1000.0]
+
+        def slow_existing(kind):
+            clock[0] += 10  # listing the indexes of a kind took 10 s
+            return []
+
+        collection = mock.MagicMock()
+        with (
+            mock.patch.object(indexes, "declared", return_value={"thing": [self.SPEC_A]}),
+            mock.patch.object(indexes, "existing", side_effect=slow_existing),
+            mock.patch.object(indexes.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(transport, "get_collection", return_value=collection),
+        ):
+            done = indexes.apply(time_budget=5)
+
+        self.assertEqual([], done)
+        collection.create_index.assert_not_called()
+
+    def test_the_time_budget_stops_listing_further_kinds(self):
+        """With an unreachable database every kind waits for the server selection before it fails."""
+        from viur.core.db import indexes
+
+        clock = [1000.0]
+
+        def unreachable(kind):
+            clock[0] += 30
+            raise ConnectionError("server selection timed out")
+
+        with (
+            mock.patch.object(indexes, "declared", return_value={"a": [self.SPEC_A], "b": [self.SPEC_B]}),
+            mock.patch.object(indexes, "existing", side_effect=unreachable) as existing,
+            mock.patch.object(indexes.time, "monotonic", side_effect=lambda: clock[0]),
+            self.assertLogs(level="ERROR"),
+        ):
+            self.assertEqual([], indexes.apply(time_budget=5))
+        existing.assert_called_once_with("a")

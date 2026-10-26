@@ -228,32 +228,48 @@ def apply(
 ) -> list[tuple[str, str, float]]:
     """Create the missing indexes — of every kind, of one kind, or the explicit *specs* of one kind.
 
-    Blocks per index (a measured 75-120 s). An index that fails is logged and skipped, because a conflict with a
-    second instance building the very same index must not keep the remaining indexes from being built.
+    Blocks per index (see the module docstring for how long). An index that fails is logged and skipped, because a
+    conflict with a second instance building the very same index must not keep the remaining indexes from being
+    built; so is a kind whose indexes cannot be listed. Without the permission ``datastore.indexes.create`` (role
+    ``roles/datastore.indexAdmin`` on Firestore Enterprise) every index fails that way.
 
     :param kind: The kind to work on, or ``None`` for every declared kind.
     :param specs: Explicit specs to create instead of the declared ones; requires *kind*.
     :param time_budget: Seconds after which ``apply`` returns what it has created so far, leaving the rest to
-        the next call; checked before each ``create_index``.
+        the next call; counted from the start of the call, listing the existing indexes included, and checked
+        before each ``create_index``.
     :return: ``(kind, name, seconds)`` per created index.
     """
     from .transport import get_collection
 
+    started_all = time.monotonic()
     if specs is not None:
         if kind is None:
             raise ValueError("apply(specs=...) needs a kind")
-        have = set(existing(kind))
-        todo = {kind: [s for s in specs if s not in have]}
+        wanted = {kind: specs}
     else:
-        todo = missing()
+        wanted = declared()
         if kind is not None:
-            todo = {kind: todo.get(kind, [])}
+            wanted = {kind: wanted.get(kind, [])}
+
+    def over_budget() -> bool:
+        if time_budget is None or time.monotonic() - started_all < time_budget:
+            return False
+        logger.info(f"Index budget of {time_budget:.0f}s exhausted — the rest on the next call")
+        return True
+
     done = []
-    started_all = time.monotonic()
-    for k, lacking in todo.items():
-        for spec in lacking:
-            if time_budget is not None and time.monotonic() - started_all >= time_budget:
-                logger.info(f"Index budget of {time_budget:.0f}s exhausted — the rest on the next call")
+    for k, k_specs in wanted.items():
+        # Checked before listing, too: with an unreachable database every kind waits for the server selection.
+        if over_budget():
+            return done
+        try:
+            have = set(existing(k))
+        except Exception as exc:  # noqa: BLE001 — one kind must not block the others
+            logger.error(f"Indexes on {k!r} not listed: {type(exc).__name__}: {exc}")
+            continue
+        for spec in (s for s in k_specs if s not in have):
+            if over_budget():
                 invalidate(k)
                 return done
             started = time.monotonic()

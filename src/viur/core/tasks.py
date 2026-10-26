@@ -949,15 +949,33 @@ def start_clear_transaction_marker():
     DeleteEntitiesIter.startIterOnQuery(query)
 
 
+_INDEX_TIME_BUDGET: t.Final[int] = 300
+"""Seconds one index task spends on ``indexes.apply``: with one more ``createIndex`` (up to ~120 s) started just
+before it runs out, a task stays below the 10-minute request deadline of App Engine automatic scaling."""
+
+
 @CallDeferred
 def apply_indexes_deferred(kind: str | None = None) -> None:
     """Create the indexes declared in ``index.yaml`` but missing; deferred, as ``createIndex`` takes minutes.
 
+    Works under ``_INDEX_TIME_BUDGET`` and queues itself again while indexes are missing and the run created at
+    least one, so a run that creates nothing (e.g. without the permission ``datastore.indexes.create``, see
+    :func:`viur.core.db.indexes.apply`) ends the chain. Any other failure is logged and ends the task with
+    :class:`PermanentTaskFailure` instead of a 500: the task queue retries a 500, and without ``retry_parameters``
+    in ``queue.yaml`` it does so endlessly.
+
     :param kind: Restrict the run to one kind; ``None`` (or empty) covers every declared kind.
     """
     from viur.core.db import indexes
-    for done_kind, name, seconds in indexes.apply(kind):
-        logging.info(f"ApplyIndexesTask: {name!r} on {done_kind!r} in {seconds:.1f}s")
+    try:
+        done = indexes.apply(kind, time_budget=_INDEX_TIME_BUDGET)
+        for done_kind, name, seconds in done:
+            logging.info(f"ApplyIndexesTask: {name!r} on {done_kind!r} in {seconds:.1f}s")
+        if done and (indexes.missing().get(kind) if kind else indexes.missing()):
+            apply_indexes_deferred(kind)
+    except Exception as exc:
+        logging.error(f"ApplyIndexesTask failed: {type(exc).__name__}: {exc}")
+        raise PermanentTaskFailure() from exc
 
 
 @CallableTask
@@ -989,9 +1007,9 @@ class ApplyIndexesTask(CallableTaskBase):
 def create_missing_indexes() -> None:
     """Create the indexes an instance start finds missing — never blocking.
 
-    On App Engine ``runStartupTasks`` runs deferred in the task queue, where ``apply(time_budget=300)`` stays
-    below the time limit of a single task and requeues itself via ``apply_indexes_deferred`` while anything is
-    missing. On the development server startup tasks run inline, hence the daemon thread.
+    On App Engine ``runStartupTasks`` runs deferred in the task queue, where ``apply`` under
+    ``_INDEX_TIME_BUDGET`` stays below the time limit of a single task and hands what is still missing to
+    ``apply_indexes_deferred``. On the development server startup tasks run inline, hence the daemon thread.
 
     The whole body runs under a catch-all (``indexes.missing()`` alone makes ~20 ``listIndexes`` calls): an
     unreachable database or a missing permission must keep neither this startup task nor the following ones
@@ -1014,7 +1032,7 @@ def create_missing_indexes() -> None:
 
             threading.Thread(target=_apply_in_dev_thread, name="viur-apply-indexes", daemon=True).start()
             return
-        indexes.apply(time_budget=300)
+        indexes.apply(time_budget=_INDEX_TIME_BUDGET)
         if indexes.missing():
             apply_indexes_deferred()
     except Exception as exc:
