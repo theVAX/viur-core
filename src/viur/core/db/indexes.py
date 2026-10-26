@@ -6,9 +6,15 @@ sort fields); ``_id`` is appended as the last field, in the direction of the fie
 ``utils.to_mongo_sort`` appends its tiebreaker. An entry whose only property is ``__key__``/``_id`` therefore
 declares the plain ``_id`` index ``(("_id", 1),)`` — the one a query without an explicit order needs. MongoDB
 brings that index along as ``_id_``; Firestore Enterprise creates none by itself, so there it has to be
-declared like any other. Nothing is created on its own: ``createIndex`` blocks for a measured 75-120 s per
-index, so ``apply()`` belongs in a task or a script while the instance start only runs ``check_on_startup()``,
-which warns.
+declared like any other.
+
+``createIndex`` blocks until the index is built — on Firestore Enterprise between a fraction of a second and a
+measured 75-120 s per index, depending on the collection — so ``apply()`` belongs in a task or a script, never
+in a request. ``setup()`` runs ``check_on_startup()``, which only warns; with
+``conf.db.create_indexes_on_startup`` (default ``True``) the startup task ``tasks.create_missing_indexes`` then
+creates what is missing, in the task queue or, on the development server, in a background thread. On Firestore
+Enterprise creating an index needs the permission ``datastore.indexes.create`` (role
+``roles/datastore.indexAdmin``); ``roles/datastore.user`` is not enough.
 
 ``eligible()`` is the basis of the sort elision in ``transport.run_single_filter``: an index yields the viur
 order when its leading keys are, as a set, the equality fields of the filter and the rest is exactly that order.
