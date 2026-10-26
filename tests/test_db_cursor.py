@@ -1,0 +1,93 @@
+"""Paging a list: the cursor of one page has to open the next one."""
+from unittest import mock
+
+from abstract import ViURTestCase
+
+
+def _src_skel():
+    """A minimal SkeletonInstance for ``Query.mergeExternalFilter``, without a Skeleton class on disk."""
+    from viur.core.bones import KeyBone, StringBone
+    from viur.core.skeleton import SkeletonInstance
+
+    class FakeSkelCls:
+        kindName = "thing"
+        __boneMap__ = {}
+
+    bones = {"key": KeyBone(), "name": StringBone(), "owner": StringBone()}
+    for name, bone in bones.items():
+        bone.__set_name__(FakeSkelCls, name)
+    return SkeletonInstance(FakeSkelCls, bone_map=bones)
+
+
+class TestListCursor(ViURTestCase):
+    """``List.list`` merges the request (with its cursor) first, then ``listFilter`` and the default order add to
+    the query. The cursor is bound to the query it was issued for, so it must be checked against the final one."""
+
+    def _list_page(self, kwargs: dict, owner: str = "me", returns: list[dict] = ()):
+        """Run one list page the way ``List.list`` builds it.
+
+        :return: The query and the ``QueryDefinition`` that reached the transport.
+        """
+        from viur.core import db
+
+        seen = []
+
+        def run_single_filter(qd, limit, keys_only, **kw):
+            seen.append(qd)
+            qd.currentCursor = {"name": returns[-1]["name"], "_id": returns[-1]["_id"]} if returns else None
+            return list(returns)
+
+        query = db.Query("thing", _src_skel()).mergeExternalFilter(kwargs)
+        query.filter("owner =", owner)  # listFilter
+        query.order("name")  # _apply_default_order
+        with mock.patch("viur.core.db.query.run_single_filter", side_effect=run_single_filter):
+            query.run()
+        return query, seen[0]
+
+    def test_the_cursor_opens_the_next_page(self):
+        query, _ = self._list_page({"limit": "2"}, returns=[{"_id": "1", "name": "a"}, {"_id": "2", "name": "b"}])
+        cursor = query.getCursor()
+        self.assertIsNotNone(cursor)
+
+        _, qd = self._list_page({"limit": "2", "cursor": cursor})
+
+        self.assertEqual({"name": "b", "_id": "2"}, qd.startCursor)
+
+    def test_a_cursor_of_another_list_filter_is_ignored(self):
+        query, _ = self._list_page({}, owner="someone-else", returns=[{"_id": "1", "name": "a"}])
+
+        with self.assertLogs(level="WARNING") as logs:
+            _, qd = self._list_page({"cursor": query.getCursor()})
+
+        self.assertIsNone(qd.startCursor)
+        self.assertIn("Ignoring invalid cursor", "\n".join(logs.output))
+
+    def test_a_broken_cursor_is_ignored(self):
+        with self.assertLogs(level="WARNING"):
+            _, qd = self._list_page({"cursor": "not-a-cursor"})
+        self.assertIsNone(qd.startCursor)
+
+    def test_a_clone_keeps_the_cursor(self):
+        from viur.core import db
+
+        query, _ = self._list_page({}, returns=[{"_id": "1", "name": "a"}])
+        clone = db.Query("thing", _src_skel()).mergeExternalFilter({"cursor": query.getCursor()}).clone()
+        clone.filter("owner =", "me").order("name")
+        with mock.patch("viur.core.db.query.run_single_filter", return_value=[]) as run_single_filter:
+            clone.run()
+        self.assertEqual({"name": "a", "_id": "1"}, run_single_filter.call_args.args[0].startCursor)
+
+    def test_a_later_set_cursor_wins(self):
+        """``Pagination`` runs a query, then moves it on with ``setCursor`` and runs it again."""
+        from viur.core import db
+
+        first, _ = self._list_page({}, returns=[{"_id": "1", "name": "a"}])
+        second, _ = self._list_page({}, returns=[{"_id": "2", "name": "b"}])
+        query = db.Query("thing", _src_skel()).mergeExternalFilter({"cursor": first.getCursor()})
+        query.filter("owner =", "me").order("name")
+        with mock.patch("viur.core.db.query.run_single_filter", return_value=[]) as run_single_filter:
+            query.run()
+            query.setCursor(second.getCursor())
+            query.run()
+        self.assertEqual({"name": "b", "_id": "2"}, run_single_filter.call_args.args[0].startCursor)
+

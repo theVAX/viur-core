@@ -151,6 +151,9 @@ class Query(object):
         self._lastEntry = None
         self._fulltextQueryString: t.Union[None, str] = None
         self.lastCursor = None
+        # The cursors of an external request, applied by the next run (see mergeExternalFilter).
+        self._startCursor: str | None = None
+        self._endCursor: str | None = None
         # if not kind.startswith("viur") and not kwargs.get("_excludeFromAccessLog"):
         #     accessLog = current_db_access_log.get()
         #     if isinstance(accessLog, set):
@@ -239,21 +242,13 @@ class Query(object):
             self.queries = None
             return self
 
-        startCursor = endCursor = None
-
+        # The cursor is only checked and applied when the query runs: its hash covers the final query, including
+        # what listFilter() and a default order add after this merge.
         if "cursor" in filters and filters["cursor"] and filters["cursor"].lower() != "none":
-            startCursor = filters["cursor"]
+            self._startCursor = filters["cursor"]
 
         if "endcursor" in filters and filters["endcursor"] and filters["endcursor"].lower() != "none":
-            endCursor = filters["endcursor"]
-
-        if startCursor or endCursor:
-            try:
-                self.setCursor(startCursor, endCursor)
-            except (ValueError, KeyError, TypeError) as e:
-                # A foreign or broken cursor from an external request is ignored like any other invalid filter
-                # value here, instead of turning it into a 500.
-                logging.warning(f"Ignoring invalid cursor for query on {self.kind!r}: {e!r}")
+            self._endCursor = filters["endcursor"]
 
         if limit := filters.get("limit"):
             try:
@@ -522,6 +517,18 @@ class Query(object):
                 self.queries.endCursor = before
         return self
 
+    def _apply_external_cursors(self) -> None:
+        """Apply the cursors taken over by :meth:`mergeExternalFilter`, once, right before the query runs."""
+        start, end = self._startCursor, self._endCursor
+        self._startCursor = self._endCursor = None
+        if start or end:
+            try:
+                self.setCursor(start, end)
+            except (ValueError, KeyError, TypeError) as e:
+                # A foreign or broken cursor from an external request is ignored like any other invalid filter
+                # value here, instead of turning it into a 500.
+                logging.warning(f"Ignoring invalid cursor for query on {self.kind!r}: {e!r}")
+
     def limit(self, limit: int) -> t.Self:
         """
         Sets the query limit to *limit* entities in the result.
@@ -745,6 +752,8 @@ class Query(object):
                 logging.debug(f"Query on {self.kind} aborted as being not satisfiable")
             return []
 
+        self._apply_external_cursors()
+
         if self._fulltextQueryString:
             if utils.is_in_transaction():
                 raise ValueError("Can't run fulltextSearch inside transactions!")  # InvalidStateError FIXME!
@@ -866,6 +875,7 @@ class Query(object):
             return
         elif isinstance(self.queries, list):
             raise ValueError("No iter on Multiqueries")
+        self._apply_external_cursors()
         while True:
             # run_single_filter already yields bare _id strings when keys_only is set.
             batch = self._run_single_filter_query(self.queries, 100, keys_only)
@@ -958,9 +968,8 @@ class Query(object):
         # res._limit = self._limit
         res._filterHook = self._filterHook
         res._orderHook = self._orderHook
-        # FIXME: Why is this disabled ???
-        # res._startCursor = self._startCursor
-        # res._endCursor = self._endCursor
+        res._startCursor = self._startCursor
+        res._endCursor = self._endCursor
         res._customMultiQueryMerge = self._customMultiQueryMerge
         res._calculateInternalMultiQueryLimit = self._calculateInternalMultiQueryLimit
         res.customQueryInfo = self.customQueryInfo
