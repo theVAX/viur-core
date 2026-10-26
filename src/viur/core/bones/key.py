@@ -160,15 +160,18 @@ class KeyBone(BaseBone):
                     return dbFilter  # Query is already unsatisfiable
                 oldFilter = dbFilter.queries
                 dbFilter.queries = []
+                filterKey = f"{prefix or ''}{db.KEY_SPECIAL_PROPERTY if name == 'key' else name} ="
                 for key in rawFilter[name]:
                     newFilter = copy.deepcopy(oldFilter)
                     try:
-                        if name == "key":
-                            newFilter.filters[f"{prefix or ''}{db.KEY_SPECIAL_PROPERTY} ="] = _decodeKey(key)
-                        else:
-                            newFilter.filters[f"{prefix or ''}{name} ="] = _decodeKey(key)
+                        value = _decodeKey(key)
                     except:  # Invalid key or something
                         raise RuntimeError()
+                    # AND it with a condition already on that field (e.g. from a listFilter), as Query.filter does
+                    if filterKey in newFilter.filters:
+                        existing = newFilter.filters[filterKey]
+                        value = [*existing, value] if isinstance(existing, list) else [existing, value]
+                    newFilter.filters[filterKey] = value
                     dbFilter.queries.append(newFilter)
             else:
                 try:
