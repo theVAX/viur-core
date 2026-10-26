@@ -173,6 +173,25 @@ class TestApplyIndexesDeferred(ViURTestCase):
         self._chain({"thing": [self.SPEC_A]}, self._takes(299, []), create_index, max_runs=1)
         self.assertLess(self.clock[0] - 1000, 600)
 
+    def test_an_unreachable_database_does_not_hold_a_run_until_the_deadline(self):
+        """Under ``pymongo.timeout`` the driver waits the whole remaining deadline to select a server, not 30 s."""
+        import pymongo
+        from pymongo import _csot
+
+        waits = []
+
+        def unreachable(kind):
+            waits.append(max(_csot.remaining() or 30, 0))
+            self.clock[0] += waits[-1]
+            raise pymongo.errors.ServerSelectionTimeoutError("connection refused")
+
+        kinds = {f"kind{i}": [self.SPEC_A] for i in range(16)}
+        with self.assertLogs(level="ERROR"):
+            runs, existing, _ = self._chain(kinds, unreachable, self._takes(0, "x"))
+        self.assertEqual(16, existing.call_count)
+        self.assertEqual(2, runs)
+        self.assertLessEqual(max(waits), 30)
+
     def test_the_rest_goes_to_a_follow_up_without_listing_again(self):
         """A budget used up by the inventory is no reason to stop; the next run continues where it stopped."""
         runs, existing, create_index = self._chain(

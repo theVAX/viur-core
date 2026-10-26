@@ -27,6 +27,7 @@ import threading
 import time
 import typing as t
 
+import pymongo
 import yaml
 
 from viur.core.config import conf
@@ -229,6 +230,11 @@ def missing() -> dict[str, list[IndexSpec]]:
     return result
 
 
+LISTING_TIMEOUT: t.Final[int] = 30
+"""Seconds one ``listIndexes`` of :func:`apply_part` may take. Under ``pymongo.timeout`` the driver would wait the
+whole remaining deadline to select a server instead of its default 30 s, so an unreachable database held a task
+for its entire deadline on the first kind."""
+
 #: The work of :func:`apply_part`: ``[kind, specs, listed]`` per kind, JSON-serialisable for a task payload.
 #: Before its listing, *specs* are the wanted indexes of the kind; after it, the ones still to create.
 IndexWork: t.TypeAlias = list[list]
@@ -285,7 +291,8 @@ def apply_part(work: IndexWork, *, time_budget: float | None = None) -> tuple[li
         units += 1
         if not listed:
             try:
-                have = set(existing(k))
+                with pymongo.timeout(LISTING_TIMEOUT):
+                    have = set(existing(k))
             except Exception as exc:  # noqa: BLE001 — one kind must not block the others
                 logger.error(f"Indexes on {k!r} not listed, its indexes skipped: {type(exc).__name__}: {exc}")
                 work.pop(0)

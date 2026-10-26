@@ -1019,8 +1019,8 @@ def create_missing_indexes() -> None:
 
     On App Engine the build runs in its own task, ``apply_indexes_deferred``: ``runStartupTasks`` runs every
     startup task in one deferred request, and the build must not eat into its deadline. This task only checks,
-    under ``_INDEX_DEADLINE``, whether anything is missing. On the development server startup tasks run inline,
-    hence the daemon thread.
+    under ``indexes.LISTING_TIMEOUT``, whether anything is missing. On the development server startup tasks run
+    inline, hence the daemon thread.
 
     The whole body runs under a catch-all (``indexes.missing()`` alone makes ~20 ``listIndexes`` calls): an
     unreachable database or a missing permission must keep neither this startup task nor the following ones
@@ -1030,7 +1030,7 @@ def create_missing_indexes() -> None:
     if not conf.db.create_indexes_on_startup:
         return
     try:
-        with pymongo.timeout(_INDEX_DEADLINE):
+        with pymongo.timeout(indexes.LISTING_TIMEOUT):
             if not indexes.missing():
                 return
         if conf.instance.is_dev_server:
