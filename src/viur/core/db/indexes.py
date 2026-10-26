@@ -288,9 +288,10 @@ def apply_part(work: IndexWork, *, time_budget: float | None = None) -> tuple[li
     from .transport import get_collection
 
     started_all = time.monotonic()
+    # An entry queued before the retry counter existed has three fields; *retries* then starts at 0.
     work = [
-        [k, [tuple((field, int(d)) for field, d in spec) for spec in specs], listed, retries]
-        for k, specs, listed, retries in work
+        [k, [tuple((field, int(d)) for field, d in spec) for spec in specs], listed, *(retries or [0])]
+        for k, specs, listed, *retries in work
     ]
     later = []  # units that failed transiently in this call; trying them again right away would not help
     done = []

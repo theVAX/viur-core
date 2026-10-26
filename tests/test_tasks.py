@@ -120,8 +120,12 @@ class TestApplyIndexesDeferred(ViURTestCase):
         super().setUp()
         self.clock = [1000.0]
 
-    def _chain(self, declared, existing, create_index, kind=None, max_runs=10) -> tuple[int, mock.Mock, mock.Mock]:
+    def _chain(
+        self, declared, existing, create_index, kind=None, max_runs=10, work=None,
+    ) -> tuple[int, mock.Mock, mock.Mock]:
         """Run the task and every follow-up it queues, with a JSON round trip of the payload in between.
+
+        *work* starts the chain with that payload, as a follow-up would.
 
         :return: The number of runs, the ``existing`` mock and the ``create_index`` mock.
         """
@@ -131,7 +135,7 @@ class TestApplyIndexesDeferred(ViURTestCase):
         run = tasks.apply_indexes_deferred.__wrapped__
         collection = mock.MagicMock()
         collection.create_index.side_effect = create_index
-        kwargs, runs = {}, 0
+        kwargs, runs = ({} if work is None else {"work": work}), 0
         with (
             mock.patch.object(indexes, "declared", return_value=declared),
             mock.patch.object(indexes, "existing", side_effect=existing) as existing_mock,
@@ -231,6 +235,21 @@ class TestApplyIndexesDeferred(ViURTestCase):
         self.assertEqual(4, create_index.call_count)  # tried once and retried three times
         self.assertEqual(4, runs)  # a retry waits for a later run
         self.assertEqual(1, sum(r.levelname == "ERROR" and "not created" in r.getMessage() for r in logs.records))
+
+    def test_a_follow_up_queued_before_the_retry_counter_completes_the_chain(self):
+        """A deploy can hand this code a payload of ``[kind, specs, listed]`` entries queued by the previous one."""
+        built = []
+
+        def create_index(keys):
+            built.append(tuple(keys))
+            return "x"
+
+        old_payload = [["a", [[["a", 1], ["_id", 1]]], True], ["b", [[["b", 1], ["_id", 1]]], False]]
+        runs, existing, _ = self._chain(
+            {"a": [self.SPEC_A], "b": [self.SPEC_B]}, self._takes(0, []), create_index, work=old_payload)
+        self.assertEqual(1, runs)
+        self.assertEqual([mock.call("b")], existing.call_args_list)
+        self.assertEqual([self.SPEC_A, self.SPEC_B], built)
 
     def test_a_follow_up_that_cannot_be_queued_logs_the_work_left(self):
         """The task ends without a retry by the queue, which would not be bounded, but the work left is logged."""
