@@ -97,8 +97,9 @@ class Script(Tree):
 
     def getAvailableRootNodes(self):
         # Only for users listFilter lets list at all (by default script-view or root); others neither see nor create it.
-        # listFilter only counts as yes/no here: filter conditions it adds do not restrict the single root node.
-        if not self.listFilter(self.viewSkel("node").all()):
+        # listFilter only counts as yes/no here: filter conditions it adds do not restrict the single root node, and a
+        # query narrowed down to nothing (queries is None or an empty list) counts as no.
+        if not (query := self.listFilter(self.viewSkel("node").all())) or not query.queries:
             return []
 
         return [{
@@ -189,7 +190,8 @@ class Script(Tree):
             return res
 
         # get importable key; check access first, so that refused callers do not create the root node
-        if not (qry_importable := self.listFilter(self.viewSkel("node").all().filter("name =", "importable"))):
+        qry_importable = self.listFilter(self.viewSkel("node").all().filter("name =", "importable"))
+        if not qry_importable or not qry_importable.queries:  # a query narrowed down to nothing is a refusal, too
             raise errors.Unauthorized()
 
         qry_importable.filter("parententry", self.rootnodeSkel(ensure=True)["key"])
