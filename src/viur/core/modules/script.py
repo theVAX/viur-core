@@ -96,7 +96,8 @@ class Script(Tree):
         return conf.script_admin_info or {}
 
     def getAvailableRootNodes(self):
-        if not current.user.get():
+        # Same rule as for listing scripts; anyone else neither sees nor creates the root node.
+        if not self.listFilter(self.viewSkel("node").all()):
             return []
 
         return [{
