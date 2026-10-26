@@ -732,7 +732,8 @@ class RelationalBone(BaseBone):
         Rewrites a datastore query to operate on "viur-relations" instead of the original kind.
 
         This method is needed to perform relational queries on n:m relations. It takes the original datastore query
-        and rewrites it to target the "viur-relations" kind. It also adjusts filters and sort orders accordingly.
+        and rewrites it to target the "viur-relations" kind. It also adjusts filters, OR groups and sort orders
+        accordingly.
 
         :param str name: The name of the bone.
         :param SkeletonInstance skel: The skeleton instance the bone is a part of.
@@ -773,6 +774,15 @@ class RelationalBone(BaseBone):
                 logging.warning(f"Invalid filtering! {boneName} is not in parentKeys of RelationalBone {name}!")
                 raise RuntimeError()
             dbFilter.filter(f"src.{k}", v)
+        for group in origQueries.or_filters:  # Merge the OR groups in, each condition checked like a filter above
+            conditions = []
+            for k, v in group:
+                boneName = k.split(".")[0].split(" ")[0]
+                if boneName not in self.parentKeys and boneName != db.KEY_SPECIAL_PROPERTY:
+                    logging.warning(f"Invalid filtering! {boneName} is not in parentKeys of RelationalBone {name}!")
+                    raise RuntimeError()
+                conditions.append((f"src.{k}", v))
+            dbFilter.or_filter(*conditions)
         orderList = []
         for k, d in origQueries.orders:  # Merge old sort orders in
             if k == db.KEY_SPECIAL_PROPERTY:
