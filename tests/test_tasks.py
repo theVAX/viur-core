@@ -148,7 +148,7 @@ class TestApplyIndexesDeferred(ViURTestCase):
         requeue.assert_called_once_with(None)
 
     def test_an_index_created_but_still_missing_ends_the_chain(self):
-        """``createIndex`` succeeds for an index that exists already; if the listing never shows it, it stays missing."""
+        """``createIndex`` succeeds for an existing index; if the listing never shows it, it stays missing."""
         from viur.core import tasks
         from viur.core.db import indexes
 
