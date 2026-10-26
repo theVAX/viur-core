@@ -494,6 +494,12 @@ class Query(object):
             payload = vjson.loads(base64.urlsafe_b64decode(token.encode("ASCII")).decode("ASCII"))
             return payload["after"], payload["q"]
 
+        def _check_values(query: QueryDefinition, values: t.Any) -> None:
+            # The keyset continuation reads one value per sort field, _id included (utils.after_condition).
+            fields = [name for name, _ in utils.to_mongo_sort(query.orders or utils.implicit_orders(query.filters))]
+            if not isinstance(values, dict) or any(name not in values for name in fields):
+                raise ValueError(f"This cursor carries no value for every sort field {fields!r}")
+
         after = after_hash = before = before_hash = None
         if startCursor:
             self._startCursor = None  # an explicit cursor replaces the one taken from the request
@@ -506,18 +512,22 @@ class Query(object):
             for query in self.queries:
                 assert isinstance(query, QueryDefinition)
                 if startCursor:
+                    _check_values(query, after)
                     query.startCursor = after
                 if endCursor:
+                    _check_values(query, before)
                     query.endCursor = before
         else:
             assert isinstance(self.queries, QueryDefinition)
             if startCursor:
                 if after_hash != _cursor_hash(self.queries):
                     raise ValueError("This cursor was issued for a different query")
+                _check_values(self.queries, after)
                 self.queries.startCursor = after
             if endCursor:
                 if before_hash != _cursor_hash(self.queries):
                     raise ValueError("This cursor was issued for a different query")
+                _check_values(self.queries, before)
                 self.queries.endCursor = before
         return self
 

@@ -182,3 +182,53 @@ class TestQueryOverrides(ViURTestCase):
         ):
             db.Query("thing").getEntry()
 
+
+def _token(after, query_definition) -> str:
+    """A cursor token as ``Query.getCursor`` builds it, with a valid query hash."""
+    import base64
+    from viur.core.db.query import _cursor_hash
+    from viur.core.utils import json as vjson
+    payload = {"after": after, "q": _cursor_hash(query_definition)}
+    return base64.urlsafe_b64encode(vjson.dumps(payload).encode("ASCII")).decode("ASCII")
+
+
+class TestCursorValues(ViURTestCase):
+    """A cursor with the right query hash still has to carry a value for every sort field, ``_id`` included."""
+
+    def _query(self):
+        from viur.core import db
+        return db.Query("thing").filter("owner =", "me").order("name")
+
+    def test_a_cursor_without_id_is_refused(self):
+        query = self._query()
+        with self.assertRaises(ValueError):
+            query.setCursor(_token({"name": "a"}, query.queries))
+
+    def test_a_cursor_that_is_no_dict_is_refused(self):
+        for after in (["a", "1"], "a"):
+            with self.subTest(after=after):
+                query = self._query()
+                with self.assertRaises(ValueError):
+                    query.setCursor(_token(after, query.queries))
+                with self.assertRaises(ValueError):
+                    query.setCursor(None, _token(after, query.queries))
+
+    def test_a_request_cursor_without_id_is_ignored(self):
+        from viur.core import db
+        query = self._query()
+        token = _token({"name": "a"}, query.queries)
+        request_query = db.Query("thing", _src_skel()).mergeExternalFilter({"cursor": token})
+        request_query.filter("owner =", "me").order("name")
+        with (
+            mock.patch("viur.core.db.transport._find", return_value=[]) as find,
+            self.assertLogs(level="WARNING") as logs,
+        ):
+            request_query.run()
+        self.assertIn("Ignoring invalid cursor", "\n".join(logs.output))
+        self.assertEqual({"owner": "me"}, find.call_args.args[1])
+
+    def test_a_complete_cursor_is_accepted(self):
+        query = self._query()
+        query.setCursor(_token({"name": "a", "_id": "1"}, query.queries))
+        self.assertEqual({"name": "a", "_id": "1"}, query.queries.startCursor)
+
