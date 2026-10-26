@@ -26,6 +26,14 @@ class TestKeyListKeepsRestriction(ViURTestCase):
         self.assertEqual([["allowed", "forbidden"], ["allowed", "allowed"]],
                          [qd.filters["_id ="] for qd in query.queries])
 
+    def test_a_key_list_keeps_an_id_in_restriction(self):
+        """Both conditions stay in every sub-query; ``to_mongo_filter`` ANDs ``=`` with ``IN`` only together with
+        fix/db-filter-operators (V-037), before that the ``IN`` is lost on the way to MongoDB."""
+        from viur.core import db
+        query = db.Query("thing", _skel()).filter("_id IN", ["allowed"])
+        query.mergeExternalFilter({"key": ["forbidden"]})
+        self.assertEqual([{"_id IN": ["allowed"], "_id =": "forbidden"}], [qd.filters for qd in query.queries])
+
     def test_a_key_list_with_a_prefix_keeps_the_restriction(self):
         from viur.core import db
         skel = _skel()
