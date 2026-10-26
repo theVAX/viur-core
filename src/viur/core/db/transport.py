@@ -297,7 +297,7 @@ def run_in_transaction(func: t.Callable, *args, **kwargs) -> t.Any:
                     # Last attempt failed: raise right away instead of sleeping first.
                     raise RuntimeError("Maximum transaction retries exceeded")
 
-                logger.error(f"Transaction failed with a conflict, trying again in {2 ** i} seconds")
+                logger.warning(f"Transaction failed with a conflict, trying again in {2 ** i} seconds")
                 time.sleep(2 ** i)
                 continue
         else:

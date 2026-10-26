@@ -440,7 +440,6 @@ class FileLeafSkel(TreeSkel):
         """
         Standard compute function for generating a Google Image Manipulation API serving URL for public files.
         """
-        logging.info("_compute_serving_url")
         if (
             skel["public"]
             and skel["mimetype"]
