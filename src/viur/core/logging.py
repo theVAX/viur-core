@@ -128,7 +128,6 @@ class ViURLocalFormatter(logging.Formatter):
 # Logger config
 
 client = google.cloud.logging.Client()
-requestLogger = client.logger("ViUR")
 requestLoggingRessource = Resource(
     type="gae_app",
     labels={
@@ -139,9 +138,15 @@ requestLoggingRessource = Resource(
                        else "dev_appserver"),
     }
 )
+# With an explicit resource the logger skips its resource detection (four metadata server requests at import).
+requestLogger = client.logger("ViUR", resource=requestLoggingRessource)
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
+
+# pymongo logs every command, server selection and connection event on DEBUG. To see them again, set the
+# respective logger, e.g. logging.getLogger("pymongo.command").setLevel(logging.DEBUG), after importing viur.core.
+logging.getLogger("pymongo").setLevel(logging.WARNING)
 
 # Calling getLogger(name) ensures that any placeholder loggers held by loggerDict are fully initialized
 # (https://stackoverflow.com/a/53250066)
