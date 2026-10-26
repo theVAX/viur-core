@@ -268,6 +268,69 @@ class TestCursorValues(ViURTestCase):
                 self.assertEqual({"owner": "me"}, find.call_args.args[1])
 
 
+
+class TestForgedCursorValues(ViURTestCase):
+    """The query hash binds a cursor to the shape of the query, not to its values: a client can forge any value.
+
+    A value must therefore reach MongoDB as a value. Before, the equality prefixes of the keyset chain carried it
+    bare, so an operator document such as ``{"$ne": None}`` was executed as an operator.
+    """
+
+    FORGED = ({"$ne": None}, {"$regex": "."}, {"$unknownOperator": 1}, {"$where": "true"})
+    COMPARISONS = {"$eq", "$gt", "$gte", "$lt", "$lte"}
+
+    def _mongo_filter(self, **cursors: dict) -> dict:
+        """The Mongo filter of a request carrying *cursors* (``cursor``/``endcursor``) with a valid query hash."""
+        from viur.core import db
+        shape = db.Query("thing").filter("owner =", "me").order("name").queries
+        query = db.Query("thing", _src_skel()).mergeExternalFilter(
+            {name: _token(after, shape) for name, after in cursors.items()})
+        query.filter("owner =", "me").order("name")
+        with mock.patch("viur.core.db.transport._find", return_value=[]) as find:
+            query.run()
+        return find.call_args.args[1]
+
+    def _operator_of(self, flt, forged: dict, parent: str | None = None) -> list[str | None]:
+        """The key directly above every occurrence of *forged* in *flt*: a field name, if it acts as an operator."""
+        if flt == forged:
+            return [parent]
+        if isinstance(flt, dict):
+            return [op for key, value in flt.items() for op in self._operator_of(value, forged, key)]
+        if isinstance(flt, list):
+            return [op for value in flt for op in self._operator_of(value, forged, parent)]
+        return []
+
+    def test_a_forged_start_cursor_value_stays_a_value(self):
+        forged = {"$ne": None}
+        self.assertEqual(
+            {"$and": [{"owner": "me"}, {"$or": [
+                {"name": {"$gt": forged}},
+                {"name": {"$eq": forged}, "_id": {"$gt": "1"}},
+            ]}]},
+            self._mongo_filter(cursor={"name": forged, "_id": "1"}),
+        )
+
+    def test_a_forged_end_cursor_value_stays_a_value(self):
+        forged = {"$ne": None}
+        self.assertEqual(
+            {"$and": [{"owner": "me"}, {"$or": [
+                {"$or": [{"name": {"$lt": forged}}, {"name": None}]},
+                {"name": {"$eq": forged}, "$or": [{"_id": {"$lte": "9"}}, {"_id": None}]},
+            ]}]},
+            self._mongo_filter(endcursor={"name": forged, "_id": "9"}),
+        )
+
+    def test_every_forged_value_is_an_operand_of_a_comparison(self):
+        for forged in self.FORGED:
+            for cursors in ({"cursor": {"name": forged, "_id": "1"}},
+                            {"endcursor": {"name": forged, "_id": "9"}},
+                            {"cursor": {"name": "a", "_id": forged}, "endcursor": {"name": forged, "_id": forged}}):
+                with self.subTest(forged=forged, cursors=cursors):
+                    operators = self._operator_of(self._mongo_filter(**cursors), forged)
+                    self.assertTrue(operators)
+                    self.assertLessEqual(set(operators), self.COMPARISONS)
+
+
 class TestQueryIterCursors(ViURTestCase):
     """``QueryIter`` hands the query to deferred tasks; its cursors must survive that round trip."""
 
@@ -348,7 +411,8 @@ class _FakeCollection:
                 ok = any(cls._matches(doc, part) for part in cond)
             elif isinstance(cond, dict):
                 value = doc.get(key)
-                ok = all(value != arg if op == "$ne" else value is not None and cls._OPS[op](value, arg)
+                ok = all(value != arg if op == "$ne" else value == arg if op == "$eq"
+                         else value is not None and cls._OPS[op](value, arg)
                          for op, arg in cond.items())
             else:
                 ok = doc.get(key) == cond
