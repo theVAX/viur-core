@@ -108,3 +108,47 @@ class TestSameRangeOperatorTwice(ViURTestCase):
         from viur.core import db
         query = db.Query("thing").filter("n >=", 1).filter("n <", 5)
         self.assertEqual({"n >=": 1, "n <": 5}, query.queries.filters)
+
+
+class TestRepeatedEqualityClientSide(ViURTestCase):
+    """A repeated ``=`` arrives as a list and means AND (``$all`` in MongoDB); the fulltext post-filter must agree.
+
+    The post-filter (``_entryMatchesQuery``) runs in ``Query.run()`` when the fulltext adapter does not guarantee
+    the query's constraints itself.
+    """
+
+    def _run_fulltext(self, filters: dict, hits: list[dict], restriction: tuple[str, str] | None = None) -> list:
+        from types import SimpleNamespace
+        from viur.core import db
+        from viur.core.bones import KeyBone
+        from viur.core.skeleton import SkeletonInstance
+
+        adapter = SimpleNamespace(providesFulltextSearch=True, fulltextSearchGuaranteesQueryConstrains=False,
+                                  fulltextSearch=lambda query_string, query: list(hits))
+
+        class FakeSkelCls:
+            kindName = "thing"
+            __boneMap__ = {}
+            database_adapters = [adapter]
+
+        bone = KeyBone()
+        bone.__set_name__(FakeSkelCls, "key")
+        query = db.Query("thing", SkeletonInstance(FakeSkelCls, bone_map={"key": bone}))
+        if restriction:
+            query.filter(*restriction)
+        return query.mergeExternalFilter({"search": "term", **filters}).run()
+
+    def test_a_key_from_the_request_equal_to_an_id_restriction_keeps_the_allowed_hit(self):
+        hits = [{"_id": "allowed"}, {"_id": "forbidden"}]
+        self.assertEqual([{"_id": "allowed"}],
+                         self._run_fulltext({"key": "allowed"}, hits, restriction=("_id =", "allowed")))
+
+    def test_a_key_from_the_request_other_than_an_id_restriction_matches_nothing(self):
+        hits = [{"_id": "allowed"}, {"_id": "forbidden"}]
+        self.assertEqual([], self._run_fulltext({"key": "forbidden"}, hits, restriction=("_id =", "allowed")))
+
+    def test_a_repeated_equality_on_a_multi_value_field_needs_every_value(self):
+        from viur.core.db.query import _entryMatchesQuery
+        self.assertTrue(_entryMatchesQuery({"tags": ["a", "b", "c"]}, {"tags =": ["a", "b"]}))
+        self.assertFalse(_entryMatchesQuery({"tags": ["a", "c"]}, {"tags =": ["a", "b"]}))
+        self.assertFalse(_entryMatchesQuery({"tags": "a"}, {"tags =": ["a", "b"]}))

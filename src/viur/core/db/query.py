@@ -72,8 +72,10 @@ def _entryMatchesQuery(
     for filterStr, filterValue in singleFilter.items():
         field, opcode = filterStr.split(" ")
         entryValue = entry.get(field)
-        # Several bounds with the same range operator arrive as a list, see utils.to_mongo_filter.
-        bounds = filterValue if opcode in utils._INEQUALITY_OPS and isinstance(filterValue, list) else [filterValue]
+        # Several ``=`` or several bounds with the same range operator arrive as a list and mean AND, see
+        # utils.to_mongo_filter (``$all`` for ``=``).
+        is_and_list = opcode == "=" or opcode in utils._INEQUALITY_OPS
+        bounds = filterValue if is_and_list and isinstance(filterValue, list) else [filterValue]
         if not all(doesMatch(entryValue, bound, opcode) for bound in bounds):
             return False
 
