@@ -45,3 +45,19 @@ class TestEqualityNextToOtherOperators(ViURTestCase):
         self.assertEqual({"tags": {"$all": ["a", "b"], "$nin": ["c"]}},
                          to_mongo_filter({"tags =": ["a", "b"], "tags NOT_IN": ["c"]}, []))
 
+
+class TestSameRangeOperatorTwice(ViURTestCase):
+    """A second ``>=`` on a field used to turn both bounds into one list value (``{"$gte": [1, 5]}``)."""
+
+    def test_a_second_bound_with_the_same_operator_is_refused(self):
+        from viur.core import db
+        for op in ("<", "<=", ">", ">="):
+            with self.subTest(op=op):
+                query = db.Query("thing").filter(f"n {op}", 1)
+                with self.assertRaises(ValueError):
+                    query.filter(f"n {op}", 5)
+
+    def test_a_range_from_two_different_operators_still_works(self):
+        from viur.core import db
+        query = db.Query("thing").filter("n >=", 1).filter("n <", 5)
+        self.assertEqual({"n >=": 1, "n <": 5}, query.queries.filters)

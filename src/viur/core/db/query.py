@@ -306,7 +306,8 @@ class Query(object):
         # Normalize IN/NOT_IN passed as lowercase
         op = op.upper() if op.upper() in {"IN", "NOT_IN"} else op
 
-        if op in {"IN", "!=", "NOT_IN"} and not isinstance(self.queries, list):
+        # A second value would join the first in a list, which Mongo compares as one array value.
+        if op in {"IN", "!=", "NOT_IN", "<", "<=", ">", ">="} and not isinstance(self.queries, list):
             if f"{field} {op}" in self.queries.filters:
                 raise ValueError(f"Cannot use multiple {op} filters on the same field '{field}'")
 
