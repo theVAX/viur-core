@@ -72,7 +72,9 @@ def _entryMatchesQuery(
     for filterStr, filterValue in singleFilter.items():
         field, opcode = filterStr.split(" ")
         entryValue = entry.get(field)
-        if not doesMatch(entryValue, filterValue, opcode):
+        # Several bounds with the same range operator arrive as a list, see utils.to_mongo_filter.
+        bounds = filterValue if opcode in utils._INEQUALITY_OPS and isinstance(filterValue, list) else [filterValue]
+        if not all(doesMatch(entryValue, bound, opcode) for bound in bounds):
             return False
 
     if or_filters:
@@ -306,8 +308,7 @@ class Query(object):
         # Normalize IN/NOT_IN passed as lowercase
         op = op.upper() if op.upper() in {"IN", "NOT_IN"} else op
 
-        # A second value would join the first in a list, which Mongo compares as one array value.
-        if op in {"IN", "!=", "NOT_IN", "<", "<=", ">", ">="} and not isinstance(self.queries, list):
+        if op in {"IN", "!=", "NOT_IN"} and not isinstance(self.queries, list):
             if f"{field} {op}" in self.queries.filters:
                 raise ValueError(f"Cannot use multiple {op} filters on the same field '{field}'")
 

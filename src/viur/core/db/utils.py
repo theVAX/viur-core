@@ -115,17 +115,22 @@ def to_mongo_filter(filters: dict, or_filters: list) -> dict:
     """Translate viur filters (``{"field op": value}``) into a Mongo filter.
 
     Several ``=`` on the same field arrive as a list (``Query.filter`` appends them) and mean AND, which is
-    ``$all`` in Mongo. ``=`` next to another operator on the same field becomes ``$eq`` in that field's operator
-    dict, so neither replaces the other; a lone ``=`` stays a plain value. *or_filters* is a list of groups: OR
-    inside a group, AND between the groups.
+    ``$all`` in Mongo. Several bounds with the same range operator (``<``, ``<=``, ``>``, ``>=``) arrive as a list
+    the same way and become one condition each, AND-ed via ``$and``. ``=`` next to another operator on the same
+    field becomes ``$eq`` in that field's operator dict, so neither replaces the other; a lone ``=`` stays a plain
+    value. *or_filters* is a list of groups: OR inside a group, AND between the groups.
 
     :param filters: The viur AND filters.
     :param or_filters: The viur OR groups.
     :return: The Mongo filter.
     """
     out: dict = {}
+    groups = []
     for key, value in filters.items():
         field, op = _split(key)
+        if op in _INEQUALITY_OPS and isinstance(value, list):
+            groups += [{field: {_OPS[op]: bound}} for bound in value]
+            continue
         if op == "=":
             mongo_op = "$all" if isinstance(value, list) else "$eq"
         else:
@@ -135,7 +140,6 @@ def to_mongo_filter(filters: dict, or_filters: list) -> dict:
         out.setdefault(field, {})[mongo_op] = value
     # The plain value is the form indexes.equality_fields() takes for an index prefix.
     out = {field: cond["$eq"] if cond.keys() == {"$eq"} else cond for field, cond in out.items()}
-    groups = []
     for group in or_filters:
         groups.append({"$or": [to_mongo_filter({k: v}, []) for k, v in group]})
     if groups:

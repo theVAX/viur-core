@@ -47,15 +47,44 @@ class TestEqualityNextToOtherOperators(ViURTestCase):
 
 
 class TestSameRangeOperatorTwice(ViURTestCase):
-    """A second ``>=`` on a field used to turn both bounds into one list value (``{"$gte": [1, 5]}``)."""
+    """A second ``>=`` on a field used to turn both bounds into one list value (``{"$gte": [1, 5]}``).
 
-    def test_a_second_bound_with_the_same_operator_is_refused(self):
+    Both bounds have to hold, e.g. one from ``listFilter`` and one from the request.
+    """
+
+    OPS = {"<": "$lt", "<=": "$lte", ">": "$gt", ">=": "$gte"}
+
+    def test_both_bounds_are_kept(self):
         from viur.core import db
-        for op in ("<", "<=", ">", ">="):
+        from viur.core.db.utils import to_mongo_filter
+        for op, mongo_op in self.OPS.items():
             with self.subTest(op=op):
-                query = db.Query("thing").filter(f"n {op}", 1)
-                with self.assertRaises(ValueError):
-                    query.filter(f"n {op}", 5)
+                qd = db.Query("thing").filter(f"n {op}", 1).filter(f"n {op}", 5).queries
+                self.assertEqual({"$and": [{"n": {mongo_op: 1}}, {"n": {mongo_op: 5}}]},
+                                 to_mongo_filter(qd.filters, qd.or_filters))
+
+    def test_both_bounds_next_to_other_filters_and_an_or_group(self):
+        from viur.core.db.utils import to_mongo_filter
+        self.assertEqual(
+            {"$and": [{"a": 1, "n": {"$lt": 9}}, {"n": {"$gte": 1}}, {"n": {"$gte": 5}}, {"$or": [{"b": 2}]}]},
+            to_mongo_filter({"a =": 1, "n >=": [1, 5], "n <": 9}, [[("b =", 2)]]),
+        )
+
+    def test_both_bounds_are_kept_in_every_sub_query_of_a_multi_query(self):
+        from viur.core import db
+        from viur.core.db.utils import to_mongo_filter
+        query = db.Query("thing")
+        query.queries = [db.QueryDefinition("thing", {"x =": 1}, []), db.QueryDefinition("thing", {"x =": 2}, [])]
+        query.filter("n >=", 1).filter("n >=", 5)
+        for qd in query.queries:
+            self.assertEqual({"$and": [{"x": qd.filters["x ="]}, {"n": {"$gte": 1}}, {"n": {"$gte": 5}}]},
+                             to_mongo_filter(qd.filters, qd.or_filters))
+
+    def test_a_client_side_match_checks_both_bounds(self):
+        """``_entryMatchesQuery`` (the post-filter of a fulltext search) reads the same filters."""
+        from viur.core.db.query import _entryMatchesQuery
+        self.assertFalse(_entryMatchesQuery({"n": 3}, {"n >=": [1, 5]}))
+        self.assertTrue(_entryMatchesQuery({"n": 7}, {"n >=": [1, 5]}))
 
     def test_a_range_from_two_different_operators_still_works(self):
         from viur.core import db
