@@ -308,9 +308,12 @@ class Query(object):
         # Normalize IN/NOT_IN passed as lowercase
         op = op.upper() if op.upper() in {"IN", "NOT_IN"} else op
 
-        if op in {"IN", "!=", "NOT_IN"} and not isinstance(self.queries, list):
-            if f"{field} {op}" in self.queries.filters:
-                raise ValueError(f"Cannot use multiple {op} filters on the same field '{field}'")
+        # A second value would be appended to the first as a list, which Mongo reads as one operand. This holds for
+        # every sub-query of a MultiQuery as well.
+        if op in {"IN", "!=", "NOT_IN"} and any(
+            f"{field} {op}" in qd.filters for qd in (self.queries if isinstance(self.queries, list) else [self.queries])
+        ):
+            raise ValueError(f"Cannot use multiple {op} filters on the same field '{field}'")
 
         filterStr = f"{field} {op}"
         if isinstance(self.queries, list):
