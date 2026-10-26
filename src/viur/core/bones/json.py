@@ -1,6 +1,5 @@
 import ast
 import json
-import jsonschema
 import typing as t
 from viur.core.bones.base import ReadFromClientError, ReadFromClientErrorSeverity
 from viur.core.bones.raw import RawBone
@@ -38,8 +37,11 @@ class JsonBone(RawBone):
 
         super().__init__(indexed=indexed, multiple=multiple, languages=languages, **kwargs)
 
-        # Validate the schema; if it's invalid a SchemaError will be raised
-        jsonschema.validators.validator_for(False).check_schema(schema)
+        # Validate the schema; if it's invalid a SchemaError will be raised.
+        # The empty default schema is always valid, so the core skeletons don't load jsonschema at startup.
+        if not (isinstance(schema, dict) and not schema):
+            import jsonschema
+            jsonschema.validators.validator_for(False).check_schema(schema)
         self.schema = schema
 
     def singleValueSerialize(self, value, skel: 'SkeletonInstance', name: str, parentIndexed: bool):
@@ -70,6 +72,8 @@ class JsonBone(RawBone):
                             ReadFromClientError(ReadFromClientErrorSeverity.Invalid, f"Invalid JSON supplied: {e!s}")
                         ]
 
+            import jsonschema
+
             try:
                 jsonschema.validate(value, self.schema)
             except (jsonschema.exceptions.ValidationError, jsonschema.exceptions.SchemaError) as e:
@@ -85,3 +89,11 @@ class JsonBone(RawBone):
         return super().structure() | {
             "schema": self.schema
         }
+
+
+def __getattr__(attr: str) -> t.Any:
+    if attr == "jsonschema":  # imported on first use since 4.0; still importable from here
+        import jsonschema
+        return jsonschema
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

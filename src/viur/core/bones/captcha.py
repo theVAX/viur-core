@@ -5,9 +5,6 @@ import warnings
 from viur.core import conf, current
 from viur.core.bones.base import BaseBone, ReadFromClientError, ReadFromClientErrorSeverity
 
-from google.cloud import recaptchaenterprise_v1
-from google.cloud.recaptchaenterprise_v1 import Assessment
-
 if t.TYPE_CHECKING:
     from viur.core.skeleton import SkeletonInstance
 
@@ -113,6 +110,8 @@ class CaptchaBone(BaseBone):
             logging.info("Skipping captcha validation for root user")
             return None  # Don't bother trusted users with this (not supported by admin/vi anyway)
 
+        from google.cloud import recaptchaenterprise_v1  # imported on first use, not at instance start
+
         client = recaptchaenterprise_v1.RecaptchaEnterpriseServiceClient()
 
         # Set the attributes of the event to be tracked.
@@ -175,3 +174,11 @@ class CaptchaBone(BaseBone):
             "render_challenge": self.render_challenge,
             "action": self.recaptcha_action
         }
+
+
+def __getattr__(attr: str) -> t.Any:
+    if attr in ("recaptchaenterprise_v1", "Assessment"):  # imported on first use since 4.0; still importable
+        from google.cloud import recaptchaenterprise_v1
+        return recaptchaenterprise_v1 if attr == "recaptchaenterprise_v1" else recaptchaenterprise_v1.Assessment
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

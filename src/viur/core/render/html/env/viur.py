@@ -8,8 +8,6 @@ from datetime import timedelta
 from hashlib import sha512
 import jinja2
 from deprecated.sphinx import deprecated
-from qrcode import make as qrcode_make
-from qrcode.image import svg as qrcode_svg
 
 import string
 from viur.core import Method, current, errors, prototypes, securitykey, utils
@@ -744,4 +742,19 @@ def qrcode(render: Render, data: str) -> str:
 
     :return: The SVG string representation.
     """
+    from qrcode import make as qrcode_make
+    from qrcode.image import svg as qrcode_svg
+
     return qrcode_make(data, image_factory=qrcode_svg.SvgPathImage, box_size=30).to_string().decode("utf-8")
+
+
+def __getattr__(attr: str) -> t.Any:
+    # imported on first use since 4.0; still importable from here
+    if attr == "qrcode_make":
+        from qrcode import make
+        return make
+    if attr == "qrcode_svg":
+        from qrcode.image import svg
+        return svg
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

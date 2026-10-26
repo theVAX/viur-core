@@ -9,7 +9,6 @@ import json
 import logging
 import PIL
 import PIL.Image
-import PIL.ImageCms
 import re
 import requests
 import string
@@ -19,7 +18,6 @@ import warnings
 from collections import namedtuple
 from urllib.parse import parse_qs, quote as urlquote, unquote as urlunquote, urlsplit
 from urllib.request import urlopen
-from google.appengine.api import blobstore, images
 from google.cloud import storage
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 
@@ -138,11 +136,13 @@ def thumbnailer(fileSkel, existingFiles, params):
         if icc_profile := img.info.get("icc_profile"):
             # JPEGs might be encoded with a non-standard color-profile; we need to compensate for this if we convert
             # to WEBp as we'll loose this color-profile information
+            from PIL import ImageCms  # not `import PIL.ImageCms`: that would make PIL a local name here
+
             f = io.BytesIO(icc_profile)
-            src_profile = PIL.ImageCms.ImageCmsProfile(f)
-            dst_profile = PIL.ImageCms.createProfile("sRGB")
+            src_profile = ImageCms.ImageCmsProfile(f)
+            dst_profile = ImageCms.createProfile("sRGB")
             try:
-                img = PIL.ImageCms.profileToProfile(
+                img = ImageCms.profileToProfile(
                     img,
                     inputProfile=src_profile,
                     outputProfile=dst_profile,
@@ -454,6 +454,8 @@ class FileLeafSkel(TreeSkel):
             if conf.instance.is_dev_server:
                 logging.warning(f"Can't create serving_url for {filename!r} on local development server")
                 return
+
+            from google.appengine.api import images
 
             try:
                 # Generate Google Image Manipulation API Serving-URL
@@ -1432,6 +1434,8 @@ def doCleanupDeletedFiles(cursor=None):
                     f.delete()
 
                     if f["serving_url"]:
+                        from google.appengine.api import blobstore, images
+
                         bucket = conf.main_app.file.get_bucket(f["dlkey"])
                         blob_key = blobstore.create_gs_key(
                             f"/gs/{bucket.name}/{f['dlkey']}/source/{f['name']}"
@@ -1469,5 +1473,10 @@ def __getattr__(attr: str) -> object:
         warnings.warn(msg, DeprecationWarning, stacklevel=2)
         logging.warning(msg, stacklevel=2)
         return entry[1]
+
+    if attr in ("blobstore", "images"):
+        # Imported on first use since 4.0; still importable from here
+        from google.appengine.api import blobstore, images
+        return {"blobstore": blobstore, "images": images}[attr]
 
     return super(__import__(__name__).__class__).__getattribute__(attr)
