@@ -270,12 +270,19 @@ def apply(
 
 
 def equality_fields(flt: dict) -> frozenset[str]:
-    """The top-level fields of the Mongo filter *flt* holding a plain equality value — the index prefix."""
-    # Neither an operator dict nor ``$and``/``$or`` counts; everything else is filtered residually.
-    return frozenset(
-        field for field, value in flt.items()
-        if not field.startswith("$") and not (isinstance(value, dict) and any(k.startswith("$") for k in value))
-    )
+    """The fields of the Mongo filter *flt* holding a plain equality value — the index prefix.
+
+    Looks into ``$and`` as well, where ``utils.to_mongo_filter`` puts the AND filters next to OR groups.
+    """
+    # Neither an operator dict nor an ``$or`` counts; everything else is filtered residually.
+    fields = set()
+    for field, value in flt.items():
+        if field == "$and":
+            for part in value:
+                fields |= equality_fields(part)
+        elif not field.startswith("$") and not (isinstance(value, dict) and any(k.startswith("$") for k in value)):
+            fields.add(field)
+    return frozenset(fields)
 
 
 def eligible(kind: str, eq_fields: frozenset[str], sort: list[tuple[str, int]]) -> IndexSpec | None:
