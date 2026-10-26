@@ -24,6 +24,14 @@ class TestJsonBoneInit(ViURTestCase):
         with self.assertRaises(jsonschema.SchemaError):
             JsonBone(schema={"type": "invalid_type"})
 
+    def test_empty_non_dict_schema_raises(self):
+        """Only the empty dict is skipped as trivially valid; other empty mappings are no JSON schema."""
+        import collections
+        import jsonschema
+        from viur.core.bones.json import JsonBone
+        with self.assertRaises(jsonschema.SchemaError):
+            JsonBone(schema=collections.UserDict())
+
 
 class TestJsonBoneSingleValueFromClient(ViURTestCase):
 

@@ -645,3 +645,11 @@ class History(List):
 
 
 History.json = True
+
+
+def __getattr__(attr: str) -> t.Any:
+    if attr == "bigquery":  # imported on first use since 4.0; still importable from here
+        from google.cloud import bigquery
+        return bigquery
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

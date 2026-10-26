@@ -174,3 +174,11 @@ class CaptchaBone(BaseBone):
             "render_challenge": self.render_challenge,
             "action": self.recaptcha_action
         }
+
+
+def __getattr__(attr: str) -> t.Any:
+    if attr in ("recaptchaenterprise_v1", "Assessment"):  # imported on first use since 4.0; still importable
+        from google.cloud import recaptchaenterprise_v1
+        return recaptchaenterprise_v1 if attr == "recaptchaenterprise_v1" else recaptchaenterprise_v1.Assessment
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

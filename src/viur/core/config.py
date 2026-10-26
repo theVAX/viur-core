@@ -8,12 +8,12 @@ import warnings
 from pathlib import Path
 
 import google.auth
+from google.appengine.api.memcache import Client
 
 from viur.core.version import __version__
 from viur.core.current import user as current_user
 
 if t.TYPE_CHECKING:  # pragma: no cover
-    from google.appengine.api.memcache import Client
     from viur.core.bones.text import HtmlBoneConfiguration
     from viur.core.email import EmailTransport
     from viur.core.skeleton import SkeletonInstance
@@ -316,7 +316,7 @@ class Database(ConfigType):
     query_default_limit: int = 30
     """Sets the default query limit for all queries."""
 
-    memcache_client: "Client | None" = None
+    memcache_client: Client | None = None
     """If set, ViUR cache data for the db.get in the Memcache for faster access."""
 
     create_access_log: bool = True

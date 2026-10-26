@@ -746,3 +746,15 @@ def qrcode(render: Render, data: str) -> str:
     from qrcode.image import svg as qrcode_svg
 
     return qrcode_make(data, image_factory=qrcode_svg.SvgPathImage, box_size=30).to_string().decode("utf-8")
+
+
+def __getattr__(attr: str) -> t.Any:
+    # imported on first use since 4.0; still importable from here
+    if attr == "qrcode_make":
+        from qrcode import make
+        return make
+    if attr == "qrcode_svg":
+        from qrcode.image import svg
+        return svg
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

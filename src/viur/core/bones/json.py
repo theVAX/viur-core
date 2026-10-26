@@ -39,7 +39,7 @@ class JsonBone(RawBone):
 
         # Validate the schema; if it's invalid a SchemaError will be raised.
         # The empty default schema is always valid, so the core skeletons don't load jsonschema at startup.
-        if schema != {}:
+        if not (isinstance(schema, dict) and not schema):
             import jsonschema
             jsonschema.validators.validator_for(False).check_schema(schema)
         self.schema = schema
@@ -89,3 +89,11 @@ class JsonBone(RawBone):
         return super().structure() | {
             "schema": self.schema
         }
+
+
+def __getattr__(attr: str) -> t.Any:
+    if attr == "jsonschema":  # imported on first use since 4.0; still importable from here
+        import jsonschema
+        return jsonschema
+
+    raise AttributeError(f"module {__name__!r} has no attribute {attr!r}")

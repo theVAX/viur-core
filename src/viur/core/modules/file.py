@@ -453,9 +453,10 @@ class FileLeafSkel(TreeSkel):
                 logging.warning(f"Can't create serving_url for {filename!r} on local development server")
                 return
 
+            from google.appengine.api import images
+
             try:
                 # Generate Google Image Manipulation API Serving-URL
-                from google.appengine.api import images
                 return images.get_serving_url(None, secure_url=True, filename=filename)
 
             except Exception as e:
@@ -1470,5 +1471,10 @@ def __getattr__(attr: str) -> object:
         warnings.warn(msg, DeprecationWarning, stacklevel=2)
         logging.warning(msg, stacklevel=2)
         return entry[1]
+
+    if attr in ("blobstore", "images"):
+        # Imported on first use since 4.0; still importable from here
+        from google.appengine.api import blobstore, images
+        return {"blobstore": blobstore, "images": images}[attr]
 
     return super(__import__(__name__).__class__).__getattribute__(attr)

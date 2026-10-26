@@ -2062,4 +2062,8 @@ def __getattr__(attr):
             logging.warning(msg)
             return UserSkel
 
+        case "user_agents":  # imported on first use since 4.0; still importable from here
+            import user_agents
+            return user_agents
+
     return super(__import__(__name__).__class__).__getattr__(attr)
