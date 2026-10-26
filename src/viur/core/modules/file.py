@@ -9,7 +9,6 @@ import json
 import logging
 import PIL
 import PIL.Image
-import PIL.ImageCms
 import re
 import requests
 import string
@@ -19,7 +18,6 @@ import warnings
 from collections import namedtuple
 from urllib.parse import parse_qs, quote as urlquote, unquote as urlunquote, urlsplit
 from urllib.request import urlopen
-from google.appengine.api import blobstore, images
 from google.cloud import storage
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 
@@ -136,11 +134,13 @@ def thumbnailer(fileSkel, existingFiles, params):
         if icc_profile := img.info.get("icc_profile"):
             # JPEGs might be encoded with a non-standard color-profile; we need to compensate for this if we convert
             # to WEBp as we'll loose this color-profile information
+            from PIL import ImageCms  # not `import PIL.ImageCms`: that would make PIL a local name here
+
             f = io.BytesIO(icc_profile)
-            src_profile = PIL.ImageCms.ImageCmsProfile(f)
-            dst_profile = PIL.ImageCms.createProfile("sRGB")
+            src_profile = ImageCms.ImageCmsProfile(f)
+            dst_profile = ImageCms.createProfile("sRGB")
             try:
-                img = PIL.ImageCms.profileToProfile(
+                img = ImageCms.profileToProfile(
                     img,
                     inputProfile=src_profile,
                     outputProfile=dst_profile,
@@ -455,6 +455,7 @@ class FileLeafSkel(TreeSkel):
 
             try:
                 # Generate Google Image Manipulation API Serving-URL
+                from google.appengine.api import images
                 return images.get_serving_url(None, secure_url=True, filename=filename)
 
             except Exception as e:
@@ -1430,6 +1431,8 @@ def doCleanupDeletedFiles(cursor=None):
                     f.delete()
 
                     if f["serving_url"]:
+                        from google.appengine.api import blobstore, images
+
                         bucket = conf.main_app.file.get_bucket(f["dlkey"])
                         blob_key = blobstore.create_gs_key(
                             f"/gs/{bucket.name}/{f['dlkey']}/source/{f['name']}"

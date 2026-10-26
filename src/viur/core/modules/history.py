@@ -2,7 +2,7 @@ import difflib
 import json
 import logging
 import typing as t
-from google.cloud import exceptions, bigquery
+from google.cloud import exceptions
 from viur.core import conf, utils, current, tasks
 from viur.core.bones import *
 from viur.core.prototypes.list import List
@@ -223,6 +223,7 @@ class BigQueryHistory:
         if self.PATH.count(".") != 2:
             raise ValueError("{self.PATH!r} must have exactly 3 parts that separated by a dot.")
 
+        from google.cloud import bigquery  # imported on first use, most projects never write to BigQuery
         self.client = bigquery.Client()
         self.table = self.select_or_create_table()
 
@@ -245,6 +246,7 @@ class BigQueryHistory:
                 return self.client.get_table(self.PATH)
             except exceptions.NotFound:
                 logging.info(f"Table {self.PATH!r} does not exist, creating")
+                from google.cloud import bigquery
                 self.client.create_table(
                     bigquery.Table(
                         self.PATH,

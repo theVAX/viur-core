@@ -5,9 +5,6 @@ import warnings
 from viur.core import conf, current
 from viur.core.bones.base import BaseBone, ReadFromClientError, ReadFromClientErrorSeverity
 
-from google.cloud import recaptchaenterprise_v1
-from google.cloud.recaptchaenterprise_v1 import Assessment
-
 if t.TYPE_CHECKING:
     from viur.core.skeleton import SkeletonInstance
 
@@ -112,6 +109,8 @@ class CaptchaBone(BaseBone):
         if not conf.security.captcha_enforce_always and (user := current.user.get()) and "root" in user["access"]:
             logging.info("Skipping captcha validation for root user")
             return None  # Don't bother trusted users with this (not supported by admin/vi anyway)
+
+        from google.cloud import recaptchaenterprise_v1  # imported on first use, not at instance start
 
         client = recaptchaenterprise_v1.RecaptchaEnterpriseServiceClient()
 

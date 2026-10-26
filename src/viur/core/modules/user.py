@@ -11,8 +11,6 @@ import urllib.parse
 import warnings
 from http.cookies import SimpleCookie
 
-import user_agents
-
 import pyotp
 import base64
 import dataclasses
@@ -534,6 +532,7 @@ class UserPassword(UserPrimaryAuthentication):
             can be send to any given user in four hours.
         """
         if user_skel := self._user_module.viewSkel().all().filter("name.idx =", user_name).getSkel():
+            import user_agents  # imported on first use, it is slow to load and only needed here
             user_agent = user_agents.parse(user_agent)
             email.send_email(
                 tpl=self.passwordRecoveryMail,

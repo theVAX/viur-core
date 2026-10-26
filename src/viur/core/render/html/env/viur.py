@@ -8,8 +8,6 @@ from datetime import timedelta
 from hashlib import sha512
 import jinja2
 from deprecated.sphinx import deprecated
-from qrcode import make as qrcode_make
-from qrcode.image import svg as qrcode_svg
 
 import string
 from viur.core import Method, current, errors, prototypes, securitykey, utils
@@ -744,4 +742,7 @@ def qrcode(render: Render, data: str) -> str:
 
     :return: The SVG string representation.
     """
+    from qrcode import make as qrcode_make
+    from qrcode.image import svg as qrcode_svg
+
     return qrcode_make(data, image_factory=qrcode_svg.SvgPathImage, box_size=30).to_string().decode("utf-8")
