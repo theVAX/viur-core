@@ -188,9 +188,70 @@ class TestApplyIndexesDeferred(ViURTestCase):
         kinds = {f"kind{i}": [self.SPEC_A] for i in range(16)}
         with self.assertLogs(level="ERROR"):
             runs, existing, _ = self._chain(kinds, unreachable, self._takes(0, "x"))
-        self.assertEqual(16, existing.call_count)
-        self.assertEqual(2, runs)
+        self.assertEqual(16 * 4, existing.call_count)  # every kind tried once and retried three times
+        self.assertEqual(7, runs)  # 64 listings of 30 s, ten per run
         self.assertLessEqual(max(waits), 30)
+
+    def test_a_short_outage_does_not_leave_indexes_missing(self):
+        """Work hit by a transient error is tried again in a later run instead of being dropped."""
+        import pymongo
+
+        outage = [
+            pymongo.errors.ServerSelectionTimeoutError("no primary available"),
+            pymongo.errors.AutoReconnect("connection reset by peer"),
+            pymongo.errors.NetworkTimeout("timed out"),
+            pymongo.errors.ExecutionTimeout("operation exceeded time limit"),
+        ]
+        built = []
+
+        def existing(kind):
+            if outage:
+                raise outage.pop(0)
+            return []
+
+        def create_index(keys):
+            if outage:
+                raise outage.pop(0)
+            built.append(tuple(keys))
+            return "x"
+
+        with self.assertLogs(level="WARNING") as logs:
+            runs, _, _ = self._chain({"a": [self.SPEC_A, self.SPEC_B], "b": [self.SPEC_C]}, existing, create_index)
+        self.assertCountEqual([self.SPEC_A, self.SPEC_B, self.SPEC_C], built)
+        self.assertEqual(3, runs)
+        self.assertEqual([], [r.getMessage() for r in logs.records if r.levelname == "ERROR"])
+
+    def test_an_index_that_keeps_failing_transiently_ends_the_chain(self):
+        """A transient error is retried a bounded number of times; then the index is given up and logged."""
+        import pymongo
+
+        with self.assertLogs(level="WARNING") as logs:
+            runs, _, create_index = self._chain(
+                {"a": [self.SPEC_A]}, self._takes(0, []), self._takes(1, pymongo.errors.AutoReconnect("reset")))
+        self.assertEqual(4, create_index.call_count)  # tried once and retried three times
+        self.assertEqual(4, runs)  # a retry waits for a later run
+        self.assertEqual(1, sum(r.levelname == "ERROR" and "not created" in r.getMessage() for r in logs.records))
+
+    def test_a_follow_up_that_cannot_be_queued_logs_the_work_left(self):
+        """The task ends without a retry by the queue, which would not be bounded, but the work left is logged."""
+        from viur.core import tasks
+        from viur.core.db import indexes, transport
+
+        run = tasks.apply_indexes_deferred.__wrapped__
+        collection = mock.MagicMock()
+        collection.create_index.side_effect = self._takes(400, "a_1__id_1")
+        with (
+            mock.patch.object(indexes, "declared", return_value={"thing": [self.SPEC_A, self.SPEC_B]}),
+            mock.patch.object(indexes, "existing", return_value=[]),
+            mock.patch.object(transport, "get_collection", return_value=collection),
+            mock.patch.object(indexes.time, "monotonic", side_effect=lambda: self.clock[0]),
+            mock.patch.object(tasks, "apply_indexes_deferred", side_effect=RuntimeError("Cloud Tasks unavailable")),
+            self.assertLogs(level="ERROR") as logs,
+            self.assertRaises(tasks.PermanentTaskFailure),
+        ):
+            run()
+        self.assertIn("left undone: thing: 1 index(es)", "\n".join(logs.output))
+        self.assertIn("Cloud Tasks unavailable", "\n".join(logs.output))
 
     def test_the_rest_goes_to_a_follow_up_without_listing_again(self):
         """A budget used up by the inventory is no reason to stop; the next run continues where it stopped."""
@@ -282,6 +343,30 @@ class TestIndexesApply(ViURTestCase):
         self.assertEqual([("fine", "b_1__id_1")], [(kind, name) for kind, name, _ in done])
         collection.create_index.assert_called_once_with(list(self.SPEC_B))
         self.assertIn("broken", "\n".join(logs.output))
+
+    def test_a_transient_failure_is_tried_again(self):
+        """``apply`` has no follow-up task, so it tries the work left by a transient error again itself."""
+        import pymongo
+        from viur.core.db import indexes, transport
+
+        outage = [pymongo.errors.AutoReconnect("connection reset by peer")]
+
+        def existing(kind):
+            if outage:
+                raise outage.pop(0)
+            return []
+
+        collection = mock.MagicMock()
+        collection.create_index.return_value = "a_1__id_1"
+        with (
+            mock.patch.object(indexes, "declared", return_value={"thing": [self.SPEC_A]}),
+            mock.patch.object(indexes, "existing", side_effect=existing),
+            mock.patch.object(transport, "get_collection", return_value=collection),
+            self.assertLogs(level="WARNING"),
+        ):
+            done = indexes.apply()
+
+        self.assertEqual([("thing", "a_1__id_1")], [(kind, name) for kind, name, _ in done])
 
     def test_the_time_budget_covers_the_inventory(self):
         from viur.core.db import indexes, transport

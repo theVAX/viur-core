@@ -235,9 +235,21 @@ LISTING_TIMEOUT: t.Final[int] = 30
 whole remaining deadline to select a server instead of its default 30 s, so an unreachable database held a task
 for its entire deadline on the first kind."""
 
-#: The work of :func:`apply_part`: ``[kind, specs, listed]`` per kind, JSON-serialisable for a task payload.
-#: Before its listing, *specs* are the wanted indexes of the kind; after it, the ones still to create.
+#: The work of :func:`apply_part`: ``[kind, specs, listed, retries]`` per entry, JSON-serialisable for a task
+#: payload. Before its listing, *specs* are the wanted indexes of the kind; after it, the ones still to create.
+#: *retries* counts the transient failures of the entry's next unit; a listing resets it, and an index that
+#: failed goes on in an entry of its own.
 IndexWork: t.TypeAlias = list[list]
+
+MAX_RETRIES: t.Final[int] = 3
+"""How often :func:`apply_part` tries a unit again after a transient error (:func:`transient`)."""
+
+
+def transient(exc: Exception) -> bool:
+    """Can *exc* pass by itself: a lost connection, an unreachable server, a timeout?"""
+    return isinstance(exc, pymongo.errors.ConnectionFailure) or (
+        isinstance(exc, pymongo.errors.PyMongoError) and exc.timeout
+    )
 
 
 def plan(kind: str | None = None, specs: list[IndexSpec] | None = None) -> IndexWork:
@@ -250,22 +262,23 @@ def plan(kind: str | None = None, specs: list[IndexSpec] | None = None) -> Index
     if specs is not None:
         if kind is None:
             raise ValueError("apply(specs=...) needs a kind")
-        return [[kind, list(specs), False]]
+        return [[kind, list(specs), False, 0]]
     wanted = declared()
     if kind is not None:
-        return [[kind, wanted[kind], False]] if kind in wanted else []
-    return [[k, specs, False] for k, specs in wanted.items()]
+        return [[kind, wanted[kind], False, 0]] if kind in wanted else []
+    return [[k, specs, False, 0] for k, specs in wanted.items()]
 
 
 def apply_part(work: IndexWork, *, time_budget: float | None = None) -> tuple[list[tuple[str, str, float]], IndexWork]:
     """Do *work* from :func:`plan` until it is done or *time_budget* is used up; return what is left.
 
-    One unit is listing the indexes of a kind or creating one index, and every unit is done once: a kind that
-    cannot be listed and an index that fails are logged and dropped, because a conflict with a second instance
-    building the very same index must not keep the remaining indexes from being built. The budget is checked
-    before every unit but the first, so each call makes progress and the left-over work shrinks with every call.
-    Without the permission ``datastore.indexes.create`` (role ``roles/datastore.indexAdmin`` on Firestore
-    Enterprise) every index fails that way.
+    One unit is listing the indexes of a kind or creating one index. A unit that fails with a transient error
+    (:func:`transient`) is left for a later call, up to ``MAX_RETRIES`` times, so a short outage of the database
+    does not leave indexes missing. Any other failure, and the last transient one, is logged and the unit dropped,
+    because a conflict with a second instance building the very same index must not keep the remaining indexes
+    from being built. Without the permission ``datastore.indexes.create`` (role ``roles/datastore.indexAdmin`` on
+    Firestore Enterprise) every index fails that way. The budget is checked before every unit but the first, so
+    each call tries at least one unit, and a chain of calls ends after at most ``1 + MAX_RETRIES`` calls per unit.
 
     :param work: The work, possibly from a task payload (JSON lists instead of tuples).
     :param time_budget: Seconds, counted from the start of the call, after which no further unit starts. It does
@@ -275,46 +288,62 @@ def apply_part(work: IndexWork, *, time_budget: float | None = None) -> tuple[li
     from .transport import get_collection
 
     started_all = time.monotonic()
-    work = [[k, [tuple((field, int(d)) for field, d in spec) for spec in specs], listed] for k, specs, listed in work]
+    work = [
+        [k, [tuple((field, int(d)) for field, d in spec) for spec in specs], listed, retries]
+        for k, specs, listed, retries in work
+    ]
+    later = []  # units that failed transiently in this call; trying them again right away would not help
     done = []
     units = 0
     while work:
-        k, specs, listed = work[0]
+        k, specs, listed, retries = work[0]
         if listed and not specs:
             invalidate(k)
             work.pop(0)
             continue
         if units and time_budget is not None and time.monotonic() - started_all >= time_budget:
-            logger.info(f"Index budget of {time_budget:.0f}s used up — left: {describe(work)}")
+            logger.info(f"Index budget of {time_budget:.0f}s used up — left: {describe(work + later)}")
             invalidate(k)
-            return done, work
+            return done, work + later
         units += 1
         if not listed:
             try:
                 with pymongo.timeout(LISTING_TIMEOUT):
                     have = set(existing(k))
             except Exception as exc:  # noqa: BLE001 — one kind must not block the others
-                logger.error(f"Indexes on {k!r} not listed, its indexes skipped: {type(exc).__name__}: {exc}")
                 work.pop(0)
+                if transient(exc) and retries < MAX_RETRIES:
+                    logger.warning(f"Indexes on {k!r} not listed, left for a later run "
+                                   f"(retry {retries + 1}/{MAX_RETRIES}): {type(exc).__name__}: {exc}")
+                    later.append([k, specs, False, retries + 1])
+                else:
+                    logger.error(f"Indexes on {k!r} not listed, its indexes skipped: {type(exc).__name__}: {exc}")
                 continue
-            work[0] = [k, [s for s in specs if s not in have], True]
+            work[0] = [k, [s for s in specs if s not in have], True, 0]
             continue
         spec = specs.pop(0)
         started = time.monotonic()
         try:
             created = get_collection(k).create_index(list(spec))
         except Exception as exc:  # noqa: BLE001 — one index must not block the others
-            logger.error(f"Index {name(spec)!r} on {k!r} not created: {type(exc).__name__}: {exc}")
+            if transient(exc) and retries < MAX_RETRIES:
+                logger.warning(f"Index {name(spec)!r} on {k!r} failed, left for a later run "
+                               f"(retry {retries + 1}/{MAX_RETRIES}): {type(exc).__name__}: {exc}")
+                later.append([k, [spec], True, retries + 1])
+            else:
+                logger.error(f"Index {name(spec)!r} on {k!r} not created: {type(exc).__name__}: {exc}")
             continue
         seconds = time.monotonic() - started
         logger.info(f"Index {created!r} on {k!r} created in {seconds:.1f}s")
         done.append((k, created, seconds))
-    return done, work
+    return done, later
 
 
 def describe(work: IndexWork) -> str:
     """A short summary of *work* for the log."""
-    return ", ".join(f"{k}: {len(specs)} index(es)" if listed else f"{k}: not listed yet" for k, specs, listed in work)
+    return ", ".join(
+        f"{k}: {len(specs)} index(es)" if listed else f"{k}: not listed yet" for k, specs, listed, *_ in work
+    )
 
 
 def apply(
@@ -323,7 +352,7 @@ def apply(
     """Create the missing indexes — of every kind, of one kind, or the explicit *specs* of one kind.
 
     Blocks per index (see the module docstring for how long); see :func:`apply_part` for how failures and the
-    budget are handled.
+    budget are handled. The units :func:`apply_part` leaves after a transient error are tried again here.
 
     :param kind: The kind to work on, or ``None`` for every declared kind.
     :param specs: Explicit specs to create instead of the declared ones; requires *kind*.
@@ -331,7 +360,15 @@ def apply(
         the next call.
     :return: ``(kind, name, seconds)`` per created index.
     """
-    return apply_part(plan(kind, specs), time_budget=time_budget)[0]
+    started = time.monotonic()
+    work, done = plan(kind, specs), []
+    while work:
+        budget = None if time_budget is None else time_budget - (time.monotonic() - started)
+        if budget is not None and budget <= 0:
+            break
+        part, work = apply_part(work, time_budget=budget)
+        done += part
+    return done
 
 
 def equality_fields(flt: dict) -> frozenset[str]:
