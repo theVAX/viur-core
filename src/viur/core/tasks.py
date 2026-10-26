@@ -768,6 +768,13 @@ class MetaQueryIter(type):
         super(MetaQueryIter, cls).__init__(name, bases, dct)
 
 
+_FETCH_ORDER: t.Final[dict[db.SortOrder, db.SortOrder]] = {
+    db.SortOrder.InvertedAscending: db.SortOrder.Descending,
+    db.SortOrder.InvertedDescending: db.SortOrder.Ascending,
+}
+"""The plain order an ``Inverted*`` order fetches in (see ``db.utils.to_mongo_sort``)."""
+
+
 class QueryIter(object, metaclass=MetaQueryIter):
     """
         BaseClass to run a database Query and process each entry matched.
@@ -793,11 +800,16 @@ class QueryIter(object, metaclass=MetaQueryIter):
         assert isinstance(query.queries, db.QueryDefinition), ("Unsatisfiable query or query with a custom multi-query "
                                                                "(SpatialBone/RandomSliceBone)")
         assert not query.queries.or_filters, "Cannot serialize a query with OR filters into a deferred task"
+        query._apply_external_cursors()  # the cursors of a request, checked against the final query
         qryDict = {
             "kind": query.kind,
             "srcSkel": query.srcSkel.kindName if query.srcSkel is not None else None,
             "filters": query.queries.filters,
-            "orders": [(propName, sortOrder.value) for propName, sortOrder in query.queries.orders],
+            # A step continues after the last row of the previous one. An Inverted* order reads its start cursor
+            # inclusively (for paging backwards) and would hand the same row to every step, so the iteration runs
+            # with the plain order of the same direction.
+            "orders": [(propName, _FETCH_ORDER.get(sortOrder, sortOrder).value)
+                       for propName, sortOrder in query.queries.orders],
             "startCursor": query.queries.startCursor,
             "endCursor": query.queries.endCursor,
             "origKind": query.origKind,
@@ -846,7 +858,9 @@ class QueryIter(object, metaclass=MetaQueryIter):
         qry.srcSkel = skeletonByKind(qryDict["srcSkel"])() if qryDict["srcSkel"] else None
         qry.queries.filters = qryDict["filters"]
         qry.queries.orders = [db.QueryOrder(name, db.SortOrder(order)) for name, order in qryDict["orders"]]
-        qry.setCursor(qryDict["startCursor"], qryDict["endCursor"])
+        # The value dicts of the QueryDefinition, already checked when they were applied to the original query.
+        qry.queries.startCursor = qryDict["startCursor"]
+        qry.queries.endCursor = qryDict["endCursor"]
         qry.origKind = qryDict["origKind"]
         qry.queries.distinct = qryDict["distinct"]
 
@@ -876,9 +890,7 @@ class QueryIter(object, metaclass=MetaQueryIter):
 
             qryDict["totalCount"] += 1
 
-        cursor = qry.getCursor()
-
-        if cursor:
+        if cursor := qry.queries.currentCursor:
             qryDict["startCursor"] = cursor
             cls._requeueStep(qryDict)
         else:

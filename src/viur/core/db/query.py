@@ -8,6 +8,8 @@ import json
 import logging
 import typing as t
 
+import bson
+
 from viur.core.config import conf
 from viur.core.utils import json as vjson
 from .transport import count, get, run_single_filter
@@ -153,6 +155,11 @@ class Query(object):
         self._lastEntry = None
         self._fulltextQueryString: t.Union[None, str] = None
         self.lastCursor = None
+        # The cursors of an external request, applied by the next run (see mergeExternalFilter).
+        self._startCursor: str | None = None
+        self._endCursor: str | None = None
+        # Set by getEntry() for its run: a single-entry lookup, see transport.run_single_filter.
+        self._lookup = False
         # if not kind.startswith("viur") and not kwargs.get("_excludeFromAccessLog"):
         #     accessLog = current_db_access_log.get()
         #     if isinstance(accessLog, set):
@@ -241,21 +248,13 @@ class Query(object):
             self.queries = None
             return self
 
-        startCursor = endCursor = None
-
+        # The cursor is only checked and applied when the query runs: its hash covers the final query, including
+        # what listFilter() and a default order add after this merge.
         if "cursor" in filters and filters["cursor"] and filters["cursor"].lower() != "none":
-            startCursor = filters["cursor"]
+            self._startCursor = filters["cursor"]
 
         if "endcursor" in filters and filters["endcursor"] and filters["endcursor"].lower() != "none":
-            endCursor = filters["endcursor"]
-
-        if startCursor or endCursor:
-            try:
-                self.setCursor(startCursor, endCursor)
-            except (ValueError, KeyError, TypeError) as e:
-                # A foreign or broken cursor from an external request is ignored like any other invalid filter
-                # value here, instead of turning it into a 500.
-                logging.warning(f"Ignoring invalid cursor for query on {self.kind!r}: {e!r}")
+            self._endCursor = filters["endcursor"]
 
         if limit := filters.get("limit"):
             try:
@@ -499,33 +498,64 @@ class Query(object):
         :returns: Returns the query itself for chaining.
         """
         def _decode(token: str) -> tuple[dict, str]:
-            payload = vjson.loads(base64.urlsafe_b64decode(token.encode("ASCII")).decode("ASCII"))
-            return payload["after"], payload["q"]
+            try:
+                payload = vjson.loads(base64.urlsafe_b64decode(token.encode("ASCII")).decode("ASCII"))
+                return payload["after"], payload["q"]
+            except Exception as e:  # noqa: BLE001 — client input; the decoder raises more than ValueError
+                raise ValueError(f"Undecodable cursor: {e!r}") from e
+
+        def _check_values(query: QueryDefinition, values: t.Any) -> None:
+            # The keyset continuation reads one value per sort field, _id included (utils.after_condition).
+            fields = [name for name, _ in utils.to_mongo_sort(query.orders or utils.implicit_orders(query.filters))]
+            if not isinstance(values, dict) or any(name not in values for name in fields):
+                raise ValueError(f"This cursor carries no value for every sort field {fields!r}")
+            try:
+                bson.encode(values)  # the values become part of the Mongo filter
+            except Exception as e:  # noqa: BLE001 — e.g. OverflowError for an int beyond 64 bit
+                raise ValueError(f"This cursor carries a value MongoDB cannot take: {e!r}") from e
 
         after = after_hash = before = before_hash = None
         if startCursor:
+            self._startCursor = None  # an explicit cursor replaces the one taken from the request
             after, after_hash = _decode(startCursor)
         if endCursor:
+            self._endCursor = None
             before, before_hash = _decode(endCursor)
 
         if isinstance(self.queries, list):
             for query in self.queries:
                 assert isinstance(query, QueryDefinition)
                 if startCursor:
+                    _check_values(query, after)
                     query.startCursor = after
                 if endCursor:
+                    _check_values(query, before)
                     query.endCursor = before
         else:
             assert isinstance(self.queries, QueryDefinition)
             if startCursor:
                 if after_hash != _cursor_hash(self.queries):
                     raise ValueError("This cursor was issued for a different query")
+                _check_values(self.queries, after)
                 self.queries.startCursor = after
             if endCursor:
                 if before_hash != _cursor_hash(self.queries):
                     raise ValueError("This cursor was issued for a different query")
+                _check_values(self.queries, before)
                 self.queries.endCursor = before
         return self
+
+    def _apply_external_cursors(self) -> None:
+        """Apply the cursors taken over by :meth:`mergeExternalFilter`, once, right before the query runs."""
+        start, end = self._startCursor, self._endCursor
+        self._startCursor = self._endCursor = None
+        if start or end:
+            try:
+                self.setCursor(start, end)
+            except (ValueError, KeyError, TypeError) as e:
+                # A foreign or broken cursor from an external request is ignored like any other invalid filter
+                # value here, instead of turning it into a 500.
+                logging.warning(f"Ignoring invalid cursor for query on {self.kind!r}: {e!r}")
 
     def limit(self, limit: int) -> t.Self:
         """
@@ -618,7 +648,7 @@ class Query(object):
         :param limit: How many results should at most be returned
         :return: The first *limit* entities (or, if *keys_only*, their ``_id`` strings) that match this query
         """
-        return run_single_filter(query, limit, keys_only)
+        return run_single_filter(query, limit, keys_only, lookup=self._lookup)
 
     def _merge_multi_query_results(self, input_result: list[list[dict]]) -> list[dict]:
         """
@@ -750,6 +780,8 @@ class Query(object):
                 logging.debug(f"Query on {self.kind} aborted as being not satisfiable")
             return []
 
+        self._apply_external_cursors()
+
         if self._fulltextQueryString:
             if utils.is_in_transaction():
                 raise ValueError("Can't run fulltextSearch inside transactions!")  # InvalidStateError FIXME!
@@ -871,6 +903,7 @@ class Query(object):
             return
         elif isinstance(self.queries, list):
             raise ValueError("No iter on Multiqueries")
+        self._apply_external_cursors()
         while True:
             # run_single_filter already yields bare _id strings when keys_only is set.
             batch = self._run_single_filter_query(self.queries, 100, keys_only)
@@ -925,11 +958,12 @@ class Query(object):
 
         :returns: The first entity on success, or None if the result-set is empty.
         """
+        self._lookup = True
         try:
-            res = list(self.run(limit=1))[0]
-            return res
-        except (IndexError, TypeError):  # Empty result-set
-            return None
+            res = self.run(limit=1)
+        finally:
+            self._lookup = False
+        return res[0] if res else None
 
     def getSkel(self) -> t.Optional["SkeletonInstance"]:
         """
@@ -963,9 +997,8 @@ class Query(object):
         # res._limit = self._limit
         res._filterHook = self._filterHook
         res._orderHook = self._orderHook
-        # FIXME: Why is this disabled ???
-        # res._startCursor = self._startCursor
-        # res._endCursor = self._endCursor
+        res._startCursor = self._startCursor
+        res._endCursor = self._endCursor
         res._customMultiQueryMerge = self._customMultiQueryMerge
         res._calculateInternalMultiQueryLimit = self._calculateInternalMultiQueryLimit
         res.customQueryInfo = self.customQueryInfo

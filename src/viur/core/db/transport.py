@@ -317,7 +317,9 @@ def run_in_transaction(func: t.Callable, *args, **kwargs) -> t.Any:
     return res
 
 
-def run_single_filter(query: QueryDefinition, limit: int, keys_only: bool) -> list[dict | str]:
+def run_single_filter(
+    query: QueryDefinition, limit: int, keys_only: bool, *, lookup: bool = False,
+) -> list[dict | str]:
     """Run a single ``QueryDefinition`` against MongoDB and return the hits.
 
     *query* is the ``QueryDefinition`` itself, not the ``Query`` — that is how ``Query._run_single_filter_query``
@@ -332,6 +334,9 @@ def run_single_filter(query: QueryDefinition, limit: int, keys_only: bool) -> li
     :param query: The single query definition to run.
     :param limit: The maximum number of documents to return.
     :param keys_only: Return only the ``_id`` of each hit instead of the whole document.
+    :param lookup: A single-document lookup (``Query.getEntry``): with ``limit == 1`` and without any order,
+        cursor or distinct no ``sort()`` is sent and no cursor issued. Without it every query is sorted, at least
+        by ``_id``, so a list page of one entry still gets a cursor.
     :return: The documents found, or their ``_id``s when *keys_only* is set.
     """
     # imported here, db.utils itself imports this module
@@ -345,7 +350,8 @@ def run_single_filter(query: QueryDefinition, limit: int, keys_only: bool) -> li
     orders = query.orders or implicit_orders(query.filters or {})
     # A limit-1 lookup without any order (neither explicit nor implicit), without a cursor and without distinct
     # sends no sort(): the scan stops at the first hit instead of loading and sorting every hit.
-    lookup = limit == 1 and not orders and not query.startCursor and not query.endCursor and not query.distinct
+    lookup = (lookup and limit == 1 and not orders and not query.startCursor and not query.endCursor
+              and not query.distinct)
     sort = [] if lookup else to_mongo_sort(orders)
     inverted = any(
         order in (SortOrder.InvertedAscending, SortOrder.InvertedDescending)
