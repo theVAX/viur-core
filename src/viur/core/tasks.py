@@ -284,6 +284,7 @@ class TaskHandler(Module):
         # We must defer from cron, as tasks will interpret it as a call originating from task-queue - causing deferred
         # functions to be called directly, wich causes calls with _countdown etc set to fail.
         req.DEFERRED_TASK_CALLED = True
+        failed = []
         for task, interval in _periodicTasks[cronName].items():  # Call all periodic tasks bound to that queue
             periodicTaskName = task.periodicTaskName.lower()
             if interval:  # Ensure this task doesn't get called to often
@@ -300,13 +301,17 @@ class TaskHandler(Module):
             except Exception as e:
                 logging.error(f"Error calling periodic task {periodicTaskName}")
                 logging.exception(e)
+                failed.append(periodicTaskName)
             else:
                 logging.debug(f"Successfully called task {periodicTaskName}")
-            if interval:
-                # Update its last-call timestamp
-                entry = {"_id": periodicTaskName, "date": utils.utcNow()}
-                db.put("viur-task-interval", entry)
+                if interval:
+                    # Update its last-call timestamp; a failed task is tried again on the next cron request
+                    entry = {"_id": periodicTaskName, "date": utils.utcNow()}
+                    db.put("viur-task-interval", entry)
         logging.debug("Periodic tasks complete")
+        if failed:
+            # The other periodic tasks have run; fail the cron request so the failure is visible
+            raise errors.InternalServerError(f"Periodic tasks failed: {', '.join(failed)}")
 
     def _is_valid_request(
         self,

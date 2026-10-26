@@ -53,6 +53,9 @@ status: accepted
   executed at all - and why every *further* deferred call in the same request
   is queued again, including a `super()` call from an override.
 - A deferred call always returns `None`. Never use its return value.
+- A periodic task whose call raises (including a failed enqueue) does not get
+  its last-call timestamp: it runs again on the next cron request. The other
+  periodic tasks still run, then the cron request answers 500.
 - Calling a `@CallDeferred` super method from a `@CallDeferred` override
   defers twice; pass `_call_deferred=False`.
 - Deferring inside a transaction is handled for you: a transaction marker is
