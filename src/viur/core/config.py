@@ -348,11 +348,11 @@ class Database(ConfigType):
     because a ``createIndex`` blocks for minutes."""
 
     create_indexes_on_startup: bool = True
-    """Create missing indexes when an instance starts — concurrently, never blocking: on App Engine in the
-    task queue (a startup task that works under a time budget and requeues itself while indexes are missing),
-    on the development server in a background thread. One index takes up to a measured 75-120 s on Firestore
-    Enterprise and needs the permission ``datastore.indexes.create`` (role ``roles/datastore.indexAdmin``);
-    without it every index fails and is logged as an error."""
+    """Create missing indexes when an instance starts — concurrently, never blocking: on App Engine in a task of
+    its own (``tasks.apply_indexes_deferred``, which works under a time budget and a deadline and queues the rest
+    as a follow-up), on the development server in a background thread. One index takes up to a measured
+    75-120 s on Firestore Enterprise and needs the permission ``datastore.indexes.create`` (role
+    ``roles/datastore.indexAdmin``); without it every index fails and is logged as an error."""
 
     sort_elision: bool = True
     """Leave ``sort()`` out when an existing index already yields the order, and verify the result client-side.

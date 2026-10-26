@@ -12,8 +12,8 @@ declared like any other.
 measured 75-120 s per index, depending on the collection — so ``apply()`` belongs in a task or a script, never
 in a request. ``setup()`` runs ``check_on_startup()``, which only warns; with
 ``conf.db.create_indexes_on_startup`` (default ``True``) the startup task ``tasks.create_missing_indexes`` then
-creates what is missing, in the task queue or, on the development server, in a background thread. On Firestore
-Enterprise creating an index needs the permission ``datastore.indexes.create`` (role
+has what is missing created, in a task of its own or, on the development server, in a background thread. On
+Firestore Enterprise creating an index needs the permission ``datastore.indexes.create`` (role
 ``roles/datastore.indexAdmin``); ``roles/datastore.user`` is not enough.
 
 ``eligible()`` is the basis of the sort elision in ``transport.run_single_filter``: an index yields the viur
@@ -229,66 +229,102 @@ def missing() -> dict[str, list[IndexSpec]]:
     return result
 
 
+#: The work of :func:`apply_part`: ``[kind, specs, listed]`` per kind, JSON-serialisable for a task payload.
+#: Before its listing, *specs* are the wanted indexes of the kind; after it, the ones still to create.
+IndexWork: t.TypeAlias = list[list]
+
+
+def plan(kind: str | None = None, specs: list[IndexSpec] | None = None) -> IndexWork:
+    """The work of creating the missing indexes — of every kind, of one kind, or the explicit *specs* of one kind.
+
+    :param kind: The kind to work on, or ``None`` for every declared kind.
+    :param specs: Explicit specs to create instead of the declared ones; requires *kind*.
+    :return: The work for :func:`apply_part`.
+    """
+    if specs is not None:
+        if kind is None:
+            raise ValueError("apply(specs=...) needs a kind")
+        return [[kind, list(specs), False]]
+    wanted = declared()
+    if kind is not None:
+        return [[kind, wanted[kind], False]] if kind in wanted else []
+    return [[k, specs, False] for k, specs in wanted.items()]
+
+
+def apply_part(work: IndexWork, *, time_budget: float | None = None) -> tuple[list[tuple[str, str, float]], IndexWork]:
+    """Do *work* from :func:`plan` until it is done or *time_budget* is used up; return what is left.
+
+    One unit is listing the indexes of a kind or creating one index, and every unit is done once: a kind that
+    cannot be listed and an index that fails are logged and dropped, because a conflict with a second instance
+    building the very same index must not keep the remaining indexes from being built. The budget is checked
+    before every unit but the first, so each call makes progress and the left-over work shrinks with every call.
+    Without the permission ``datastore.indexes.create`` (role ``roles/datastore.indexAdmin`` on Firestore
+    Enterprise) every index fails that way.
+
+    :param work: The work, possibly from a task payload (JSON lists instead of tuples).
+    :param time_budget: Seconds, counted from the start of the call, after which no further unit starts. It does
+        not cut a running unit short; wrap the call in ``pymongo.timeout`` for a hard deadline.
+    :return: ``(kind, name, seconds)`` per created index, and the work left (empty when everything is done).
+    """
+    from .transport import get_collection
+
+    started_all = time.monotonic()
+    work = [[k, [tuple((field, int(d)) for field, d in spec) for spec in specs], listed] for k, specs, listed in work]
+    done = []
+    units = 0
+    while work:
+        k, specs, listed = work[0]
+        if listed and not specs:
+            invalidate(k)
+            work.pop(0)
+            continue
+        if units and time_budget is not None and time.monotonic() - started_all >= time_budget:
+            logger.info(f"Index budget of {time_budget:.0f}s used up — left: {describe(work)}")
+            invalidate(k)
+            return done, work
+        units += 1
+        if not listed:
+            try:
+                have = set(existing(k))
+            except Exception as exc:  # noqa: BLE001 — one kind must not block the others
+                logger.error(f"Indexes on {k!r} not listed, its indexes skipped: {type(exc).__name__}: {exc}")
+                work.pop(0)
+                continue
+            work[0] = [k, [s for s in specs if s not in have], True]
+            continue
+        spec = specs.pop(0)
+        started = time.monotonic()
+        try:
+            created = get_collection(k).create_index(list(spec))
+        except Exception as exc:  # noqa: BLE001 — one index must not block the others
+            logger.error(f"Index {name(spec)!r} on {k!r} not created: {type(exc).__name__}: {exc}")
+            continue
+        seconds = time.monotonic() - started
+        logger.info(f"Index {created!r} on {k!r} created in {seconds:.1f}s")
+        done.append((k, created, seconds))
+    return done, work
+
+
+def describe(work: IndexWork) -> str:
+    """A short summary of *work* for the log."""
+    return ", ".join(f"{k}: {len(specs)} index(es)" if listed else f"{k}: not listed yet" for k, specs, listed in work)
+
+
 def apply(
     kind: str | None = None, specs: list[IndexSpec] | None = None, *, time_budget: float | None = None,
 ) -> list[tuple[str, str, float]]:
     """Create the missing indexes — of every kind, of one kind, or the explicit *specs* of one kind.
 
-    Blocks per index (see the module docstring for how long). An index that fails is logged and skipped, because a
-    conflict with a second instance building the very same index must not keep the remaining indexes from being
-    built; so is a kind whose indexes cannot be listed. Without the permission ``datastore.indexes.create`` (role
-    ``roles/datastore.indexAdmin`` on Firestore Enterprise) every index fails that way.
+    Blocks per index (see the module docstring for how long); see :func:`apply_part` for how failures and the
+    budget are handled.
 
     :param kind: The kind to work on, or ``None`` for every declared kind.
     :param specs: Explicit specs to create instead of the declared ones; requires *kind*.
     :param time_budget: Seconds after which ``apply`` returns what it has created so far, leaving the rest to
-        the next call; counted from the start of the call, listing the existing indexes included, and checked
-        before each ``create_index``.
+        the next call.
     :return: ``(kind, name, seconds)`` per created index.
     """
-    from .transport import get_collection
-
-    started_all = time.monotonic()
-    if specs is not None:
-        if kind is None:
-            raise ValueError("apply(specs=...) needs a kind")
-        wanted = {kind: specs}
-    else:
-        wanted = declared()
-        if kind is not None:
-            wanted = {kind: wanted.get(kind, [])}
-
-    def over_budget() -> bool:
-        if time_budget is None or time.monotonic() - started_all < time_budget:
-            return False
-        logger.info(f"Index budget of {time_budget:.0f}s exhausted — the rest on the next call")
-        return True
-
-    done = []
-    for k, k_specs in wanted.items():
-        # Checked before listing, too: with an unreachable database every kind waits for the server selection.
-        if over_budget():
-            return done
-        try:
-            have = set(existing(k))
-        except Exception as exc:  # noqa: BLE001 — one kind must not block the others
-            logger.error(f"Indexes on {k!r} not listed: {type(exc).__name__}: {exc}")
-            continue
-        for spec in (s for s in k_specs if s not in have):
-            if over_budget():
-                invalidate(k)
-                return done
-            started = time.monotonic()
-            try:
-                created = get_collection(k).create_index(list(spec))
-            except Exception as exc:  # noqa: BLE001 — one index must not block the others
-                logger.error(f"Index {name(spec)!r} on {k!r} not created: {type(exc).__name__}: {exc}")
-                continue
-            seconds = time.monotonic() - started
-            logger.info(f"Index {created!r} on {k!r} created in {seconds:.1f}s")
-            done.append((k, created, seconds))
-        invalidate(k)
-    return done
+    return apply_part(plan(kind, specs), time_budget=time_budget)[0]
 
 
 def equality_fields(flt: dict) -> frozenset[str]:

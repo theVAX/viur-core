@@ -9,6 +9,7 @@ import traceback
 import typing as t
 
 import grpc
+import pymongo
 import requests
 from google import protobuf
 from google.cloud import tasks_v2
@@ -950,36 +951,41 @@ def start_clear_transaction_marker():
 
 
 _INDEX_TIME_BUDGET: t.Final[int] = 300
-"""Seconds one index task spends on ``indexes.apply``: with one more ``createIndex`` (up to ~120 s) started just
-before it runs out, a task stays below the 10-minute request deadline of App Engine automatic scaling."""
+"""Seconds after which an index task starts no further listing or ``createIndex``."""
+
+_INDEX_DEADLINE: t.Final[int] = 480
+"""Seconds after which an index task aborts any database call still running (``pymongo.timeout``): below the
+10-minute request deadline of an App Engine task, with a reserve for queueing the follow-up and the response. A
+``createIndex`` started shortly before ``_INDEX_TIME_BUDGET`` has the rest, about 180 s (75-120 s measured)."""
 
 
 @CallDeferred
-def apply_indexes_deferred(kind: str | None = None) -> None:
+def apply_indexes_deferred(kind: str | None = None, work: list | None = None) -> None:
     """Create the indexes declared in ``index.yaml`` but missing; deferred, as ``createIndex`` takes minutes.
 
-    Works under ``_INDEX_TIME_BUDGET`` and queues itself again while indexes are missing and at least one index
-    this run created is no longer missing, so a run that creates nothing (e.g. without the permission
-    ``datastore.indexes.create``, see :func:`viur.core.db.indexes.apply`) ends the chain, and so does an index
-    that ``createIndex`` reports but the listing never shows. Any other failure is logged and ends the task with
-    :class:`PermanentTaskFailure` instead of a 500: the task queue retries a 500, and without ``retry_parameters``
-    in ``queue.yaml`` it does so endlessly.
+    One run does the work of :func:`viur.core.db.indexes.apply_part` under ``_INDEX_TIME_BUDGET`` and
+    ``_INDEX_DEADLINE`` and queues the rest as a follow-up. Every unit of work (listing a kind, creating an index)
+    is done once, failures are logged and dropped, and every run does at least one unit, so the chain ends after
+    at most one run per unit. Any other failure is logged with its traceback and ends the task with
+    :class:`PermanentTaskFailure` instead of a 500: the task queue retries a 500, and without
+    ``retry_parameters`` in ``queue.yaml`` it does so endlessly.
 
     :param kind: Restrict the run to one kind; ``None`` (or empty) covers every declared kind.
+    :param work: The work left by the previous run; ``None`` plans it anew.
     """
     from viur.core.db import indexes
     try:
-        done = indexes.apply(kind, time_budget=_INDEX_TIME_BUDGET)
+        with pymongo.timeout(_INDEX_DEADLINE):
+            done, work = indexes.apply_part(
+                indexes.plan(kind) if work is None else work, time_budget=_INDEX_TIME_BUDGET)
         for done_kind, name, seconds in done:
             logging.info(f"ApplyIndexesTask: {name!r} on {done_kind!r} in {seconds:.1f}s")
-        if done:
-            lacking = {(k, indexes.name(spec)) for k, specs in indexes.missing().items() if not kind or k == kind
-                       for spec in specs}
-            if lacking and any((k, name) not in lacking for k, name, _ in done):
-                apply_indexes_deferred(kind)
-    except Exception as exc:
-        logging.error(f"ApplyIndexesTask failed: {type(exc).__name__}: {exc}")
-        raise PermanentTaskFailure() from exc
+        if work:
+            apply_indexes_deferred(kind, work=work)
+    except Exception:
+        left = "everything" if work is None else (indexes.describe(work) or "nothing")
+        logging.exception(f"ApplyIndexesTask on {kind or 'every kind'!r} failed and ends; left undone: {left}")
+        raise PermanentTaskFailure()
 
 
 @CallableTask
@@ -1011,9 +1017,10 @@ class ApplyIndexesTask(CallableTaskBase):
 def create_missing_indexes() -> None:
     """Create the indexes an instance start finds missing — never blocking.
 
-    On App Engine ``runStartupTasks`` runs deferred in the task queue, where ``apply`` under
-    ``_INDEX_TIME_BUDGET`` stays below the time limit of a single task and hands what is still missing to
-    ``apply_indexes_deferred``. On the development server startup tasks run inline, hence the daemon thread.
+    On App Engine the build runs in its own task, ``apply_indexes_deferred``: ``runStartupTasks`` runs every
+    startup task in one deferred request, and the build must not eat into its deadline. This task only checks,
+    under ``_INDEX_DEADLINE``, whether anything is missing. On the development server startup tasks run inline,
+    hence the daemon thread.
 
     The whole body runs under a catch-all (``indexes.missing()`` alone makes ~20 ``listIndexes`` calls): an
     unreachable database or a missing permission must keep neither this startup task nor the following ones
@@ -1023,8 +1030,9 @@ def create_missing_indexes() -> None:
     if not conf.db.create_indexes_on_startup:
         return
     try:
-        if not indexes.missing():
-            return
+        with pymongo.timeout(_INDEX_DEADLINE):
+            if not indexes.missing():
+                return
         if conf.instance.is_dev_server:
             def _apply_in_dev_thread() -> None:
                 # Runs in a daemon thread without a caller that could see an exception — without this catch
@@ -1036,8 +1044,6 @@ def create_missing_indexes() -> None:
 
             threading.Thread(target=_apply_in_dev_thread, name="viur-apply-indexes", daemon=True).start()
             return
-        indexes.apply(time_budget=_INDEX_TIME_BUDGET)
-        if indexes.missing():
-            apply_indexes_deferred()
+        apply_indexes_deferred()
     except Exception as exc:
         logging.warning(f"Index creation on startup skipped: {type(exc).__name__}: {exc}")

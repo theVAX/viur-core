@@ -105,75 +105,135 @@ class TestRetryNTimesNotification(ViURTestCase):
 
 
 class TestApplyIndexesDeferred(ViURTestCase):
-    """The deferred index build must end, not be retried by the task queue forever.
+    """The deferred index build has to end: within the task deadline, and without endless retries or follow-ups.
 
     An exception leaving a deferred task becomes a 500, and the task queue retries it - without
-    ``retry_parameters`` in ``queue.yaml`` without limit.
+    ``retry_parameters`` in ``queue.yaml`` without limit. A run that outlasts the 10-minute deadline of an App
+    Engine task is retried the same way.
     """
 
-    def test_a_failure_ends_the_task(self):
+    SPEC_A = (("a", 1), ("_id", 1))
+    SPEC_B = (("b", 1), ("_id", 1))
+    SPEC_C = (("c", 1), ("_id", 1))
+
+    def setUp(self):
+        super().setUp()
+        self.clock = [1000.0]
+
+    def _chain(self, declared, existing, create_index, kind=None, max_runs=10) -> tuple[int, mock.Mock, mock.Mock]:
+        """Run the task and every follow-up it queues, with a JSON round trip of the payload in between.
+
+        :return: The number of runs, the ``existing`` mock and the ``create_index`` mock.
+        """
+        from viur.core import tasks, utils
+        from viur.core.db import indexes, transport
+
+        run = tasks.apply_indexes_deferred.__wrapped__
+        collection = mock.MagicMock()
+        collection.create_index.side_effect = create_index
+        kwargs, runs = {}, 0
+        with (
+            mock.patch.object(indexes, "declared", return_value=declared),
+            mock.patch.object(indexes, "existing", side_effect=existing) as existing_mock,
+            mock.patch.object(transport, "get_collection", return_value=collection),
+            mock.patch.object(indexes.time, "monotonic", side_effect=lambda: self.clock[0]),
+            mock.patch.object(tasks, "apply_indexes_deferred") as follow_up,
+        ):
+            while runs < max_runs:
+                runs += 1
+                follow_up.reset_mock()
+                run(kind, **kwargs)
+                if not follow_up.called:
+                    break
+                kwargs = utils.json.loads(utils.json.dumps(follow_up.call_args.kwargs))
+        return runs, existing_mock, collection.create_index
+
+    def _takes(self, seconds: float, result=None):
+        """A database call that advances the fake clock."""
+        def call(*args):
+            self.clock[0] += seconds
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return call
+
+    def test_a_run_stays_within_the_task_deadline(self):
+        """Listing for 299 s and then building for 400 s ran 699 s; the driver must end it in time."""
+        import pymongo
+        from pymongo import _csot
+
+        def create_index(keys):
+            # Honour the deadline pymongo.timeout() sets, as the driver does for every operation.
+            if (remaining := _csot.remaining()) is not None and remaining < 400:
+                self.clock[0] += max(remaining, 0)
+                raise pymongo.errors.ExecutionTimeout("operation exceeded time limit")
+            self.clock[0] += 400
+            return "a_1__id_1"
+
+        self._chain({"thing": [self.SPEC_A]}, self._takes(299, []), create_index, max_runs=1)
+        self.assertLess(self.clock[0] - 1000, 600)
+
+    def test_the_rest_goes_to_a_follow_up_without_listing_again(self):
+        """A budget used up by the inventory is no reason to stop; the next run continues where it stopped."""
+        runs, existing, create_index = self._chain(
+            {"a": [self.SPEC_A], "b": [self.SPEC_B]}, self._takes(400, []), self._takes(10, "x"))
+        self.assertEqual(3, runs)
+        self.assertEqual([mock.call("a"), mock.call("b")], existing.call_args_list)
+        self.assertEqual([mock.call(list(self.SPEC_A)), mock.call(list(self.SPEC_B))], create_index.call_args_list)
+
+    def test_a_broken_kind_does_not_stop_the_work_on_another(self):
+        def existing(kind):
+            if kind == "broken":
+                raise ConnectionError("listIndexes failed")
+            return []
+
+        runs, existing_mock, create_index = self._chain(
+            {"healthy": [self.SPEC_A, self.SPEC_B], "broken": [self.SPEC_C]}, existing, self._takes(400, "x"),
+            kind="healthy",
+        )
+        self.assertEqual(2, runs)
+        self.assertNotIn(mock.call("broken"), existing_mock.call_args_list)
+        self.assertEqual([mock.call(list(self.SPEC_A)), mock.call(list(self.SPEC_B))], create_index.call_args_list)
+
+    def test_the_chain_ends_when_nothing_can_be_created(self):
+        """Without the permission to create indexes every index fails once, is logged, and the chain ends."""
+        import pymongo
+
+        with self.assertLogs(level="ERROR") as logs:
+            runs, _, create_index = self._chain(
+                {"a": [self.SPEC_A, self.SPEC_B], "b": [self.SPEC_C]}, self._takes(0, []),
+                self._takes(200, pymongo.errors.OperationFailure("not authorized")))
+        self.assertLessEqual(runs, 5)  # at most one run per unit of work: two listings, three indexes
+        self.assertEqual(3, create_index.call_count)
+        self.assertEqual(3, sum("not created" in line for line in logs.output))
+
+    def test_an_unexpected_failure_ends_the_task_with_its_traceback(self):
         from viur.core import tasks
         from viur.core.db import indexes
 
         with (
-            mock.patch.object(indexes, "apply", side_effect=ConnectionError("listIndexes failed")),
+            mock.patch.object(indexes, "declared", side_effect=ValueError("index.yaml: unknown direction 'up'")),
             self.assertLogs(level="ERROR") as logs,
             self.assertRaises(tasks.PermanentTaskFailure),
         ):
-            tasks.apply_indexes_deferred.__wrapped__()
-        self.assertIn("listIndexes failed", "\n".join(logs.output))
-
-    def test_the_run_has_a_time_budget(self):
-        from viur.core import tasks
-        from viur.core.db import indexes
-
-        with (
-            mock.patch.object(indexes, "apply", return_value=[]) as apply,
-            mock.patch.object(indexes, "missing", return_value={}),
-        ):
             tasks.apply_indexes_deferred.__wrapped__("thing")
-        apply.assert_called_once_with("thing", time_budget=tasks._INDEX_TIME_BUDGET)
+        record = next(r for r in logs.records if "thing" in r.getMessage())
+        self.assertIsNotNone(record.exc_info)
+        self.assertIn("unknown direction", "\n".join(logs.output))
 
-    def test_queues_itself_again_while_it_makes_progress(self):
+    def test_the_startup_task_hands_the_build_to_its_own_task(self):
+        """Built inline, the index work would eat into the deadline of the other startup tasks of that request."""
         from viur.core import tasks
         from viur.core.db import indexes
 
-        run = tasks.apply_indexes_deferred.__wrapped__
         with (
-            mock.patch.object(indexes, "apply", return_value=[("thing", "a_1__id_1", 75.0)]),
-            mock.patch.object(indexes, "missing", return_value={"thing": [(("b", 1), ("_id", 1))]}),
-            mock.patch.object(tasks, "apply_indexes_deferred") as requeue,
+            mock.patch.object(indexes, "missing", return_value={"thing": [self.SPEC_A]}),
+            mock.patch.object(indexes, "apply") as apply,
+            mock.patch.object(tasks, "apply_indexes_deferred") as build,
         ):
-            run()
-        requeue.assert_called_once_with(None)
-
-    def test_an_index_created_but_still_missing_ends_the_chain(self):
-        """``createIndex`` succeeds for an existing index; if the listing never shows it, it stays missing."""
-        from viur.core import tasks
-        from viur.core.db import indexes
-
-        run = tasks.apply_indexes_deferred.__wrapped__
-        with (
-            mock.patch.object(indexes, "apply", return_value=[("thing", "b_1__id_1", 0.1)]),
-            mock.patch.object(indexes, "missing", return_value={"thing": [(("b", 1), ("_id", 1))]}),
-            mock.patch.object(tasks, "apply_indexes_deferred") as requeue,
-        ):
-            run()
-        requeue.assert_not_called()
-
-    def test_a_run_without_progress_ends_the_chain(self):
-        """Without the permission to create indexes every run would fail the same way."""
-        from viur.core import tasks
-        from viur.core.db import indexes
-
-        run = tasks.apply_indexes_deferred.__wrapped__
-        with (
-            mock.patch.object(indexes, "apply", return_value=[]),
-            mock.patch.object(indexes, "missing", return_value={"thing": [(("b", 1), ("_id", 1))]}),
-            mock.patch.object(tasks, "apply_indexes_deferred") as requeue,
-        ):
-            run()
-        requeue.assert_not_called()
+            tasks.create_missing_indexes()
+        apply.assert_not_called()
+        build.assert_called_once_with()
 
 
 class TestIndexesApply(ViURTestCase):
