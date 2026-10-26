@@ -96,7 +96,9 @@ class Script(Tree):
         return conf.script_admin_info or {}
 
     def getAvailableRootNodes(self):
-        if not current.user.get():
+        # Only for users listFilter lets list at all (by default script-view or root); others neither see nor create it.
+        # listFilter only counts as yes/no here: filter conditions it adds do not restrict the single root node.
+        if not self.listFilter(self.viewSkel("node").all()):
             return []
 
         return [{
@@ -186,12 +188,11 @@ class Script(Tree):
                 res.extend(get_files_recursively(folder_entry["_id"]))
             return res
 
-        # get importable key
-        qry_importable = (self.viewSkel("node").all()
-                          .filter("parententry", self.rootnodeSkel(ensure=True)["key"])
-                          .filter("name =", "importable"))
-        if not (qry_importable := self.listFilter(qry_importable)):
+        # get importable key; check access first, so that refused callers do not create the root node
+        if not (qry_importable := self.listFilter(self.viewSkel("node").all().filter("name =", "importable"))):
             raise errors.Unauthorized()
+
+        qry_importable.filter("parententry", self.rootnodeSkel(ensure=True)["key"])
 
         importable_key = (entity := qry_importable.getEntry()) and entity["_id"]
         if not importable_key:
