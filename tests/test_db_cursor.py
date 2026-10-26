@@ -232,3 +232,47 @@ class TestCursorValues(ViURTestCase):
         query.setCursor(_token({"name": "a", "_id": "1"}, query.queries))
         self.assertEqual({"name": "a", "_id": "1"}, query.queries.startCursor)
 
+
+class TestQueryIterCursors(ViURTestCase):
+    """``QueryIter`` hands the query to deferred tasks; its cursors must survive that round trip."""
+
+    def _steps(self, query, batches: list[list[dict]]):
+        """Run ``startIterOnQuery`` and the following ``_qryStep`` calls with a JSON round trip in between.
+
+        :return: The ``(startCursor, endCursor)`` of every query that reached the transport.
+        """
+        from viur.core import tasks, utils
+
+        payloads, seen = [], []
+
+        def run_single_filter(qd, limit, keys_only, **kw):
+            seen.append((qd.startCursor, qd.endCursor))
+            docs = batches.pop(0) if batches else []
+            qd.currentCursor = {"name": docs[-1]["name"], "_id": docs[-1]["_id"]} if docs else None
+            return docs
+
+        with (
+            mock.patch.object(tasks.QueryIter, "_requeueStep",
+                              side_effect=lambda qry_dict: payloads.append(utils.json.dumps(qry_dict))),
+            mock.patch.object(tasks.QueryIter, "handleEntry"),
+            mock.patch.object(tasks.QueryIter, "handleFinish"),
+            mock.patch("viur.core.db.query.run_single_filter", side_effect=run_single_filter),
+        ):
+            tasks.QueryIter.startIterOnQuery(query)
+            while payloads:
+                tasks.QueryIter._qryStep(utils.json.loads(payloads.pop(0)))
+        return seen
+
+    def test_the_cursors_of_the_request_reach_the_first_step(self):
+        from viur.core import db
+
+        shape = db.Query("thing").filter("owner =", "me").order("name").queries
+        start, end = _token({"name": "a", "_id": "1"}, shape), _token({"name": "x", "_id": "9"}, shape)
+        query = db.Query("thing", _src_skel()).mergeExternalFilter({"cursor": start, "endcursor": end})
+        query.filter("owner =", "me").order("name")
+        query.srcSkel = None  # the stand-in skeleton is not registered under its kind
+
+        seen = self._steps(query, [[{"_id": "2", "name": "b"}]])
+
+        self.assertEqual(({"name": "a", "_id": "1"}, {"name": "x", "_id": "9"}), seen[0])
+        self.assertEqual(({"name": "b", "_id": "2"}, {"name": "x", "_id": "9"}), seen[1])
