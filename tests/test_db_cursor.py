@@ -91,3 +91,47 @@ class TestListCursor(ViURTestCase):
             query.run()
         self.assertEqual({"name": "b", "_id": "2"}, run_single_filter.call_args.args[0].startCursor)
 
+
+class TestLimitOneCursor(ViURTestCase):
+    """A list page with ``limit=1`` needs a cursor like any other page; only ``getEntry()`` may skip the sort."""
+
+    def _run(self, call):
+        from viur.core.db import transport
+
+        with mock.patch.object(transport, "_find", return_value=[{"_id": "a"}]) as find:
+            query = call()
+        return query, find.call_args.args[2]
+
+    def test_a_limit_one_page_is_sorted_and_issues_a_cursor(self):
+        from viur.core import db
+
+        def call():
+            query = db.Query("thing")
+            query.run(1)
+            return query
+
+        query, sort = self._run(call)
+        self.assertEqual([("_id", 1)], sort)
+        self.assertIsNotNone(query.getCursor())
+
+    def test_get_entry_sends_no_sort(self):
+        from viur.core import db
+
+        def call():
+            query = db.Query("thing")
+            self.assertEqual({"_id": "a"}, query.getEntry())
+            return query
+
+        _, sort = self._run(call)
+        self.assertEqual([], sort)
+
+    def test_get_entry_keeps_an_explicit_order(self):
+        from viur.core import db
+
+        def call():
+            query = db.Query("thing").order("name")
+            query.getEntry()
+            return query
+
+        _, sort = self._run(call)
+        self.assertEqual([("name", 1), ("_id", 1)], sort)
