@@ -1,8 +1,10 @@
 """
 Tests for TimeBasedOTP:
   updateTimeDrift writes the clamped drift onto the user,
-  otp() with a drifted token completes the login and records the drift.
+  otp() with a drifted token completes the login and records the drift,
+  the drift accumulates on the stored user (real Skeleton.patch, in-memory database).
 """
+import copy
 import os
 import sys
 from unittest import mock
@@ -50,3 +52,61 @@ class TestTimeBasedOTPTimeDrift(ViURTestCase):
         self.user_skel.patch.assert_called_once_with({"+otp_timedrift": 0.3}, update_relations=False)
         self.provider._user_module.secondFactorSucceeded.assert_called_once_with(self.provider, "user-key")
         self.assertNotIn("_otp_user", current.session.get())
+
+
+_otp_user_skel_cls = None
+
+
+def _otp_user_skel():
+    """A user skeleton carrying the bones TimeBasedOTP adds, defined once per process."""
+    global _otp_user_skel_cls
+    if _otp_user_skel_cls is None:
+        from viur.core import conf, skeleton
+        from viur.core.modules.user import TimeBasedOTP
+
+        # Skeletons must live in a folder listed in conf.skeleton_search_path; this one lives in the tests.
+        with mock.patch.object(conf, "skeleton_search_path", [*conf.skeleton_search_path, "/"]):
+            class OtpUserSkel(skeleton.Skeleton):
+                kindName = "test-otp-user"
+
+        TimeBasedOTP.patch_user_skel(OtpUserSkel)
+        OtpUserSkel.__boneMap__ = skeleton.MetaBaseSkel.generate_bonemap(OtpUserSkel)
+        _otp_user_skel_cls = OtpUserSkel
+
+    return _otp_user_skel_cls
+
+
+class TestTimeDriftIsStored(ViURTestCase):
+    """updateTimeDrift through the real Skeleton.patch/read/write, against an in-memory database."""
+
+    def test_drift_accumulates_on_the_user_only(self):
+        from viur.core import db
+        from viur.core.modules.user import TimeBasedOTP
+
+        skel_cls = _otp_user_skel()
+        store = {
+            "alice": {"_id": "alice", "otp_timedrift": 1.2},
+            "bob": {"_id": "bob", "otp_timedrift": 1.2},
+        }
+
+        def get(kind, key):
+            return copy.deepcopy(store.get(key)) if kind == skel_cls.kindName else None
+
+        def put(kind, doc):
+            if kind == skel_cls.kindName:
+                store[doc["_id"]] = copy.deepcopy(doc)
+            return doc
+
+        provider = object.__new__(TimeBasedOTP)
+        provider._user_module = mock.MagicMock()
+        provider._user_module.skel.side_effect = skel_cls
+
+        with mock.patch.object(db, "get", side_effect=get), \
+                mock.patch.object(db, "put", side_effect=put), \
+                mock.patch.object(db, "is_in_transaction", return_value=True):
+            provider.updateTimeDrift("alice", 5)
+            self.assertAlmostEqual(store["alice"]["otp_timedrift"], 1.5)
+            provider.updateTimeDrift("alice", 5)
+            self.assertAlmostEqual(store["alice"]["otp_timedrift"], 1.8)
+
+        self.assertEqual(store["bob"]["otp_timedrift"], 1.2)
