@@ -2,8 +2,9 @@
 Tests for GoogleAccount.login:
   An existing user is matched by the Google user ID ("sub") first and by e-mail only when Google
   verified the address; no account is entered or created with an unverified e-mail; the first
-  match by e-mail binds the user to that Google account, in the same transaction that checks no
-  other account is bound; the gsuite domain rule relies on the "hd" claim, not on the e-mail suffix.
+  match by e-mail binds the user to that Google account, in the same transaction that checks the
+  user is still unbound and still has that e-mail; the gsuite domain rule relies on the "hd" claim,
+  not on the e-mail suffix.
 """
 import os
 import sys
@@ -24,9 +25,10 @@ class FakeRecord(dict):
 class FakeUser(FakeRecord):
     """A user found by a query, read from its stored entry."""
 
-    def __init__(self, stored: dict):
+    def __init__(self, stored: dict, writes: list[str]):
         super().__init__(stored)
         self.stored = stored
+        self.writes = writes
 
     def patch(self, values):
         """Like Skeleton.patch: read the stored entry again, change it and write it back in one transaction."""
@@ -34,6 +36,12 @@ class FakeUser(FakeRecord):
         self.update(self.stored)
         values(self)
         self.stored.update(self)
+        self.writes.append("patch")
+        return self
+
+    def write(self):
+        self.stored.update(self)
+        self.writes.append("write")
         return self
 
 
@@ -44,6 +52,7 @@ class FakeSkel(FakeRecord):
         super().__init__(sync=True)
         self.users = users  # the stored entries; they keep the changes of a login
         self.written_meanwhile = written_meanwhile or {}
+        self.writes = []  # writes of found users
         self.filters = []
         self.match = None
         self.written = False
@@ -60,7 +69,7 @@ class FakeSkel(FakeRecord):
     def getSkel(self):
         if self.match is None:
             return None
-        user = FakeUser(self.match)
+        user = FakeUser(self.match, self.writes)
         # A concurrent login writes to the stored user after this lookup.
         self.match.update(self.written_meanwhile)
         return user
@@ -164,6 +173,7 @@ class TestGoogleLogin(ViURTestCase):
             (users[0]["uid"], users[0]["firstname"], users[0]["lastname"]),
             ("google-sub-1", "Jane", "Doe"),
         )
+        self.assertEqual(self.skel.writes, ["patch"])  # one write, inside the transaction
 
     def test_first_email_match_binds_google_account_without_sync(self):
         users = [{"key": "jane", "name": "Jane@Example.com", "sync": False}]
@@ -183,6 +193,15 @@ class TestGoogleLogin(ViURTestCase):
         users = [{"key": "jane", "name": "jane@example.com", "sync": True}]
         self._assert_refused(_token(given_name="Mallory"), users, written_meanwhile={"uid": "google-sub-2"})
         self.assertEqual(users[0], {"key": "jane", "name": "jane@example.com", "sync": True, "uid": "google-sub-2"})
+
+    def test_email_changed_after_lookup_is_not_bound(self):
+        # The lookup matches the e-mail, but the user's address is changed before this login writes.
+        for sync in (True, False):
+            with self.subTest(sync=sync):
+                users = [{"key": "jane", "name": "jane@example.com", "sync": sync}]
+                self._assert_refused(_token(), users, written_meanwhile={"name": "jane.new@example.com"})
+                self.assertEqual(users[0], {"key": "jane", "name": "jane.new@example.com", "sync": sync})
+                self.assertEqual(self.skel.writes, [])
 
     def test_existing_user_is_matched_by_uid_first(self):
         self._login(
