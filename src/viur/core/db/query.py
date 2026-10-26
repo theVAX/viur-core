@@ -8,6 +8,8 @@ import json
 import logging
 import typing as t
 
+import bson
+
 from viur.core.config import conf
 from viur.core.utils import json as vjson
 from .transport import count, get, run_single_filter
@@ -491,14 +493,21 @@ class Query(object):
         :returns: Returns the query itself for chaining.
         """
         def _decode(token: str) -> tuple[dict, str]:
-            payload = vjson.loads(base64.urlsafe_b64decode(token.encode("ASCII")).decode("ASCII"))
-            return payload["after"], payload["q"]
+            try:
+                payload = vjson.loads(base64.urlsafe_b64decode(token.encode("ASCII")).decode("ASCII"))
+                return payload["after"], payload["q"]
+            except Exception as e:  # noqa: BLE001 — client input; the decoder raises more than ValueError
+                raise ValueError(f"Undecodable cursor: {e!r}") from e
 
         def _check_values(query: QueryDefinition, values: t.Any) -> None:
             # The keyset continuation reads one value per sort field, _id included (utils.after_condition).
             fields = [name for name, _ in utils.to_mongo_sort(query.orders or utils.implicit_orders(query.filters))]
             if not isinstance(values, dict) or any(name not in values for name in fields):
                 raise ValueError(f"This cursor carries no value for every sort field {fields!r}")
+            try:
+                bson.encode(values)  # the values become part of the Mongo filter
+            except Exception as e:  # noqa: BLE001 — e.g. OverflowError for an int beyond 64 bit
+                raise ValueError(f"This cursor carries a value MongoDB cannot take: {e!r}") from e
 
         after = after_hash = before = before_hash = None
         if startCursor:

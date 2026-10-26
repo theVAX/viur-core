@@ -233,6 +233,40 @@ class TestCursorValues(ViURTestCase):
         self.assertEqual({"name": "a", "_id": "1"}, query.queries.startCursor)
 
 
+    def test_a_cursor_value_bson_cannot_encode_is_refused(self):
+        """An int beyond 64 bit passed the checks and raised OverflowError when the filter was encoded."""
+        query = self._query()
+        with self.assertRaises(ValueError):
+            query.setCursor(_token({"name": "a", "_id": 2 ** 80}, query.queries))
+
+    def test_an_undecodable_cursor_is_refused(self):
+        """A broken decimal marker raised decimal.InvalidOperation while decoding, before any hash check."""
+        import base64
+        query = self._query()
+        payload = '{"after": {".__decimal__": "oops"}, "q": "x"}'
+        token = base64.urlsafe_b64encode(payload.encode("ASCII")).decode("ASCII")
+        with self.assertRaises(ValueError):
+            query.setCursor(token)
+
+    def test_crafted_request_cursors_are_ignored(self):
+        import base64
+        from viur.core import db
+        shape = self._query().queries
+        broken = '{"after": {".__decimal__": "oops"}, "q": "x"}'
+        for token in (_token({"name": "a", "_id": 2 ** 80}, shape),
+                      base64.urlsafe_b64encode(broken.encode("ASCII")).decode("ASCII")):
+            with self.subTest(token=token):
+                query = db.Query("thing", _src_skel()).mergeExternalFilter({"cursor": token})
+                query.filter("owner =", "me").order("name")
+                with (
+                    mock.patch("viur.core.db.transport._find", return_value=[]) as find,
+                    self.assertLogs(level="WARNING") as logs,
+                ):
+                    query.run()
+                self.assertIn("Ignoring invalid cursor", "\n".join(logs.output))
+                self.assertEqual({"owner": "me"}, find.call_args.args[1])
+
+
 class TestQueryIterCursors(ViURTestCase):
     """``QueryIter`` hands the query to deferred tasks; its cursors must survive that round trip."""
 
@@ -276,3 +310,4 @@ class TestQueryIterCursors(ViURTestCase):
 
         self.assertEqual(({"name": "a", "_id": "1"}, {"name": "x", "_id": "9"}), seen[0])
         self.assertEqual(({"name": "b", "_id": "2"}, {"name": "x", "_id": "9"}), seen[1])
+
