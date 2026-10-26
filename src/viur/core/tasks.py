@@ -999,11 +999,12 @@ def apply_indexes_deferred(kind: str | None = None, work: list | None = None) ->
     """Create the indexes declared in ``index.yaml`` but missing; deferred, as ``createIndex`` takes minutes.
 
     One run does the work of :func:`viur.core.db.indexes.apply_part` under ``_INDEX_TIME_BUDGET`` and
-    ``_INDEX_DEADLINE`` and queues the rest as a follow-up. Every unit of work (listing a kind, creating an index)
-    is done once, failures are logged and dropped, and every run does at least one unit, so the chain ends after
-    at most one run per unit. Any other failure is logged with its traceback and ends the task with
-    :class:`PermanentTaskFailure` instead of a 500: the task queue retries a 500, and without
-    ``retry_parameters`` in ``queue.yaml`` it does so endlessly.
+    ``_INDEX_DEADLINE`` and queues the rest as a follow-up. A unit of work (listing a kind, creating an index)
+    that fails with a transient error is part of that rest, up to ``indexes.MAX_RETRIES`` times; other failures
+    are logged and dropped. Every run tries at least one unit, so the chain ends after at most
+    ``1 + indexes.MAX_RETRIES`` runs per unit. Any other failure, a follow-up that cannot be queued included, is
+    logged with its traceback and the work left, and ends the task with :class:`PermanentTaskFailure` instead of
+    a 500: the task queue retries a 500, and without ``retry_parameters`` in ``queue.yaml`` it does so endlessly.
 
     :param kind: Restrict the run to one kind; ``None`` (or empty) covers every declared kind.
     :param work: The work left by the previous run; ``None`` plans it anew.
