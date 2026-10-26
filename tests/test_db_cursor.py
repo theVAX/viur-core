@@ -149,3 +149,36 @@ class TestLimitOneCursor(ViURTestCase):
 
         _, sort = self._run(call)
         self.assertEqual([("name", 1), ("_id", 1)], sort)
+
+
+class TestQueryOverrides(ViURTestCase):
+    """Subclasses that override ``run`` or ``_run_single_filter_query`` with the old signature keep working."""
+
+    def test_an_old_run_single_filter_query_override(self):
+        from viur.core import db
+
+        class OldQuery(db.Query):
+            def _run_single_filter_query(self, query, limit, keys_only):
+                return [{"_id": "a"}]
+
+        self.assertEqual([{"_id": "a"}], OldQuery("thing").run(5))
+        self.assertEqual({"_id": "a"}, OldQuery("thing").getEntry())
+
+    def test_an_old_run_override(self):
+        from viur.core import db
+
+        class OldQuery(db.Query):
+            def run(self, limit=-1, keys_only=False):
+                return [{"_id": "a"}]
+
+        self.assertEqual({"_id": "a"}, OldQuery("thing").getEntry())
+
+    def test_get_entry_does_not_hide_a_type_error(self):
+        from viur.core import db
+
+        with (
+            mock.patch("viur.core.db.query.run_single_filter", side_effect=TypeError("broken")),
+            self.assertRaises(TypeError),
+        ):
+            db.Query("thing").getEntry()
+

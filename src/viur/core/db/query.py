@@ -154,6 +154,8 @@ class Query(object):
         # The cursors of an external request, applied by the next run (see mergeExternalFilter).
         self._startCursor: str | None = None
         self._endCursor: str | None = None
+        # Set by getEntry() for its run: a single-entry lookup, see transport.run_single_filter.
+        self._lookup = False
         # if not kind.startswith("viur") and not kwargs.get("_excludeFromAccessLog"):
         #     accessLog = current_db_access_log.get()
         #     if isinstance(accessLog, set):
@@ -614,18 +616,15 @@ class Query(object):
         """
         return self.kind
 
-    def _run_single_filter_query(
-        self, query: QueryDefinition, limit: int, keys_only: bool, *, lookup: bool = False,
-    ) -> list[dict] | list[str]:
+    def _run_single_filter_query(self, query: QueryDefinition, limit: int, keys_only: bool) -> list[dict] | list[str]:
         """
         Internal helper function that runs a single query definition on the datastore and returns a list of
         entities found.
         :param query: The querydefinition (filters, orders, distinct etc.) to run against the datastore
         :param limit: How many results should at most be returned
-        :param lookup: A single-entry lookup, see :func:`transport.run_single_filter`.
         :return: The first *limit* entities (or, if *keys_only*, their ``_id`` strings) that match this query
         """
-        return run_single_filter(query, limit, keys_only, lookup=lookup)
+        return run_single_filter(query, limit, keys_only, lookup=self._lookup)
 
     def _merge_multi_query_results(self, input_result: list[list[dict]]) -> list[dict]:
         """
@@ -735,7 +734,7 @@ class Query(object):
 
         return resultList
 
-    def run(self, limit: int = -1, keys_only: bool = False, *, lookup: bool = False) -> list[dict] | list[str]:
+    def run(self, limit: int = -1, keys_only: bool = False) -> list[dict] | list[str]:
         """
         Run this query.
 
@@ -746,7 +745,6 @@ class Query(object):
 
         :param limit: Limits the query to the defined maximum entities.
         :param keys_only: If True, only return the ``_id`` of each entity, as a string.
-        :param lookup: Fetch a single entry without a sort and without a cursor, as :meth:`getEntry` does.
 
         :returns: The list of found entities (or, if *keys_only*, their ``_id`` strings)
 
@@ -787,7 +785,7 @@ class Query(object):
             res = []
             # We run all queries first (preventing multiple round-trips to the server)
             for singleQuery in self.queries:
-                res.append(self._run_single_filter_query(singleQuery, limit, keys_only, lookup=lookup))
+                res.append(self._run_single_filter_query(singleQuery, limit, keys_only))
 
             # Wait for the actual results to arrive and convert the protobuffs to Entries
             res = [self._fixKind(x) for x in res]
@@ -802,8 +800,7 @@ class Query(object):
             res = self._fixKind(self._run_single_filter_query(
                 self.queries,
                 limit if limit >= 0 else self.queries.limit,
-                keys_only,
-                lookup=lookup,
+                keys_only
             ))
 
         if res:
@@ -937,11 +934,12 @@ class Query(object):
 
         :returns: The first entity on success, or None if the result-set is empty.
         """
+        self._lookup = True
         try:
-            res = list(self.run(limit=1, lookup=True))[0]
-            return res
-        except (IndexError, TypeError):  # Empty result-set
-            return None
+            res = self.run(limit=1)
+        finally:
+            self._lookup = False
+        return res[0] if res else None
 
     def getSkel(self) -> t.Optional["SkeletonInstance"]:
         """
