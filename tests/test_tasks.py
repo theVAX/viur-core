@@ -147,6 +147,20 @@ class TestApplyIndexesDeferred(ViURTestCase):
             run()
         requeue.assert_called_once_with(None)
 
+    def test_an_index_created_but_still_missing_ends_the_chain(self):
+        """``createIndex`` succeeds for an index that exists already; if the listing never shows it, it stays missing."""
+        from viur.core import tasks
+        from viur.core.db import indexes
+
+        run = tasks.apply_indexes_deferred.__wrapped__
+        with (
+            mock.patch.object(indexes, "apply", return_value=[("thing", "b_1__id_1", 0.1)]),
+            mock.patch.object(indexes, "missing", return_value={"thing": [(("b", 1), ("_id", 1))]}),
+            mock.patch.object(tasks, "apply_indexes_deferred") as requeue,
+        ):
+            run()
+        requeue.assert_not_called()
+
     def test_a_run_without_progress_ends_the_chain(self):
         """Without the permission to create indexes every run would fail the same way."""
         from viur.core import tasks

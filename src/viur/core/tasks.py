@@ -958,9 +958,10 @@ before it runs out, a task stays below the 10-minute request deadline of App Eng
 def apply_indexes_deferred(kind: str | None = None) -> None:
     """Create the indexes declared in ``index.yaml`` but missing; deferred, as ``createIndex`` takes minutes.
 
-    Works under ``_INDEX_TIME_BUDGET`` and queues itself again while indexes are missing and the run created at
-    least one, so a run that creates nothing (e.g. without the permission ``datastore.indexes.create``, see
-    :func:`viur.core.db.indexes.apply`) ends the chain. Any other failure is logged and ends the task with
+    Works under ``_INDEX_TIME_BUDGET`` and queues itself again while indexes are missing and at least one index
+    this run created is no longer missing, so a run that creates nothing (e.g. without the permission
+    ``datastore.indexes.create``, see :func:`viur.core.db.indexes.apply`) ends the chain, and so does an index
+    that ``createIndex`` reports but the listing never shows. Any other failure is logged and ends the task with
     :class:`PermanentTaskFailure` instead of a 500: the task queue retries a 500, and without ``retry_parameters``
     in ``queue.yaml`` it does so endlessly.
 
@@ -971,8 +972,11 @@ def apply_indexes_deferred(kind: str | None = None) -> None:
         done = indexes.apply(kind, time_budget=_INDEX_TIME_BUDGET)
         for done_kind, name, seconds in done:
             logging.info(f"ApplyIndexesTask: {name!r} on {done_kind!r} in {seconds:.1f}s")
-        if done and (indexes.missing().get(kind) if kind else indexes.missing()):
-            apply_indexes_deferred(kind)
+        if done:
+            lacking = {(k, indexes.name(spec)) for k, specs in indexes.missing().items() if not kind or k == kind
+                       for spec in specs}
+            if lacking and any((k, name) not in lacking for k, name, _ in done):
+                apply_indexes_deferred(kind)
     except Exception as exc:
         logging.error(f"ApplyIndexesTask failed: {type(exc).__name__}: {exc}")
         raise PermanentTaskFailure() from exc
