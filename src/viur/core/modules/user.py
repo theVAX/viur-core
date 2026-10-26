@@ -742,6 +742,9 @@ class GoogleAccount(UserPrimaryAuthentication):
                 user_skel["name"] = email
                 update = True
 
+            elif user_skel["uid"] and user_skel["uid"] != uid:
+                raise errors.Forbidden("This user is bound to another Google account")
+
         # Take user information from Google, if wanted!
         if user_skel["sync"]:
             for target, source in {

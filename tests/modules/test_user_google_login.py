@@ -13,18 +13,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from abstract import ViURTestCase  # noqa: E402
 
 
-class FakeSkel(dict):
+class FakeRecord(dict):
+    """A user as a skeleton returns it: unset bones read as None."""
+
+    def __missing__(self, key):
+        return None
+
+
+class FakeSkel(FakeRecord):
     """Stands in for the user skeleton and its query; only what GoogleAccount.login touches."""
 
     def __init__(self, users: list[dict]):
         super().__init__(sync=True)
-        self.users = users
+        self.users = [FakeRecord(user) for user in users]
         self.filters = []
         self.match = None
         self.written = False
-
-    def __missing__(self, key):
-        return None
 
     def all(self):
         return self
@@ -75,34 +79,58 @@ class TestGoogleLogin(ViURTestCase):
     def _login(self, user_info: dict, users: list[dict]) -> None:
         self.skel = FakeSkel(users)
         self.provider._user_module.baseSkel.return_value = self.skel
-        with mock.patch("google.oauth2.id_token.verify_oauth2_token", return_value=user_info):
+        with mock.patch("google.oauth2.id_token.verify_oauth2_token", return_value=user_info) as self.verify:
             self.provider.login._func(self.provider, token="token")
 
     def _logged_in_key(self) -> str:
         self.provider._user_module.continueAuthenticationFlow.assert_called_once()
         return self.provider._user_module.continueAuthenticationFlow.call_args.args[1]
 
-    def test_unverified_email_does_not_enter_existing_account(self):
+    def _assert_refused(self, user_info: dict, users: list[dict]) -> None:
+        """The login is refused before any user is looked up, created, changed or logged in."""
         from viur.core import errors
+        self.provider._user_module.reset_mock()
+        with self.assertRaises(errors.Forbidden):
+            self._login(user_info, users)
+        self.assertFalse(self.skel.written)
+        self.provider._user_module.continueAuthenticationFlow.assert_not_called()
+
+    def test_unverified_email_does_not_enter_existing_account(self):
         unverified = _token(email_verified=False), _token(email_verified="false"), _token()
         del unverified[2]["email_verified"]
         for user_info in unverified:
             with self.subTest(email_verified=user_info.get("email_verified", "missing")):
-                with self.assertRaises(errors.Forbidden):
-                    self._login(user_info, [{"key": "victim", "name": "jane@example.com", "sync": False}])
-                self.provider._user_module.continueAuthenticationFlow.assert_not_called()
+                self._assert_refused(user_info, [{"key": "victim", "name": "jane@example.com", "sync": False}])
+                self.provider._user_module.baseSkel.assert_not_called()
 
-    def test_unverified_email_does_not_create_account(self):
-        from viur.core import errors
+    def test_unverified_email_is_refused_before_lookup_and_sync(self):
+        from viur.core import conf
         from viur.core.modules.user import GoogleAccount
-        with mock.patch.object(GoogleAccount, "registrationEnabled", True):
-            with self.assertRaises(errors.Forbidden):
-                self._login(_token(email_verified=False), [])
-        self.assertFalse(self.skel.written)
+        conf.user.google_gsuite_domains = ["example.com"]
+        unverified = _token(email_verified=False)
+        for case, user_info, users in (
+            ("uid-bound user with sync", unverified, [{"key": "jane", "name": "old@example.com",
+                                                      "uid": "google-sub-1", "sync": True}]),
+            ("allowed hosted domain", unverified | {"hd": "example.com"}, []),
+        ):
+            with self.subTest(case):
+                self._assert_refused(user_info, users)
+                self.provider._user_module.baseSkel.assert_not_called()
+        with mock.patch.object(GoogleAccount, "registrationEnabled", True), self.subTest("registration enabled"):
+            self._assert_refused(unverified, [])
+            self.provider._user_module.baseSkel.assert_not_called()
 
     def test_verified_email_matches_existing_user(self):
         self._login(_token(), [{"key": "jane", "name": "Jane@Example.com", "sync": False}])
         self.assertEqual(self._logged_in_key(), "jane")
+        self.assertEqual(self.skel.filters, ["uid =", "name.idx ="])
+        self.verify.assert_called_once_with("token", mock.ANY, "client-id")
+
+    def test_email_does_not_match_user_bound_to_other_google_account(self):
+        self._assert_refused(
+            _token(),  # sub "google-sub-1"
+            [{"key": "jane", "name": "jane@example.com", "uid": "google-sub-2", "sync": True}],
+        )
         self.assertEqual(self.skel.filters, ["uid =", "name.idx ="])
 
     def test_existing_user_is_matched_by_uid_first(self):
