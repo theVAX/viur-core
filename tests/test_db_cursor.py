@@ -360,8 +360,18 @@ class _FakeCollection:
 class TestQueryIterInvertedOrder(ViURTestCase):
     """An ``Inverted*`` order reads its start cursor inclusively; a task continuation must not, or it never ends."""
 
-    def _iterate(self, docs: list[dict], max_steps: int = 10) -> tuple[list[str], int]:
-        """Iterate *docs* by ``name``, ``InvertedAscending``, through the real transport and a fake collection.
+    def _query(self, order, start: dict | None = None, end: dict | None = None):
+        """The query by ``name`` in *order*, with cursors on the rows *start* and *end*."""
+        from viur.core import db
+        query = db.Query("inverted-thing").order(("name", order))
+        if start or end:
+            query.setCursor(start and _token(start, query.queries), end and _token(end, query.queries))
+        return query
+
+    def _iterate(self, docs: list[dict], max_steps: int = 10, order=None, start: dict | None = None,
+                 end: dict | None = None) -> tuple[list[str], int]:
+        """Iterate *docs* by ``name`` (``InvertedAscending`` by default) through the real transport and a fake
+        collection.
 
         :return: The names handled, in order, plus ``"finish"`` once finished, and the number of steps.
         """
@@ -385,7 +395,7 @@ class TestQueryIterInvertedOrder(ViURTestCase):
                               side_effect=lambda qry_dict: payloads.append(utils.json.dumps(qry_dict))),
             mock.patch.object(transport, "get_collection", return_value=_FakeCollection(docs)),
         ):
-            Collect.startIterOnQuery(db.Query("inverted-thing").order(("name", db.SortOrder.InvertedAscending)))
+            Collect.startIterOnQuery(self._query(order or db.SortOrder.InvertedAscending, start, end))
             while payloads and steps < max_steps:
                 steps += 1
                 Collect._qryStep(utils.json.loads(payloads.pop(0)))
@@ -402,3 +412,32 @@ class TestQueryIterInvertedOrder(ViURTestCase):
         self.assertEqual("finish", handled[-1])
         self.assertEqual(sorted(doc["name"] for doc in docs), sorted(handled[:-1]))
         self.assertLess(steps, 10)
+
+    def test_the_cursors_bound_the_iteration_as_they_bound_the_query(self):
+        """The first step reads the start cursor as the query does (inclusively for an ``Inverted*`` order)."""
+        from viur.core import db
+        from viur.core.db import transport
+
+        docs = [{"_id": str(i), "name": f"n{i:02}"} for i in range(12)]
+        row = {i: {"name": doc["name"], "_id": doc["_id"]} for i, doc in enumerate(docs)}
+        cases = {
+            # InvertedAscending fetches descending, InvertedDescending ascending.
+            db.SortOrder.InvertedAscending: [(row[2], None), (row[9], None), (None, row[4]), (row[9], row[2])],
+            db.SortOrder.InvertedDescending: [(row[9], None), (row[2], None), (None, row[4]), (row[2], row[9])],
+        }
+        for order, cursors in cases.items():
+            for start, end in cursors:
+                with self.subTest(order=order, start=start, end=end):
+                    with mock.patch.object(transport, "get_collection", return_value=_FakeCollection(docs)):
+                        expected = sorted(doc["name"] for doc in self._query(order, start, end).run(100))
+                    handled, steps = self._iterate(docs, order=order, start=start, end=end)
+                    self.assertEqual("finish", handled[-1])
+                    self.assertEqual(expected, sorted(handled[:-1]))
+                    self.assertLess(steps, 10)
+
+    def test_a_start_cursor_on_the_second_row(self):
+        """``InvertedAscending`` from the cursor of row 2 shows rows 1 and 2; the iteration handles both."""
+        from viur.core import db
+        docs = [{"_id": str(i), "name": f"n{i}"} for i in (1, 2, 3)]
+        handled, _ = self._iterate(docs, order=db.SortOrder.InvertedAscending, start={"name": "n2", "_id": "2"})
+        self.assertEqual(["n1", "n2", "finish"], sorted(handled[:-1]) + handled[-1:])
