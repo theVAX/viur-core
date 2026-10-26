@@ -1,4 +1,5 @@
 """Paging a list: the cursor of one page has to open the next one."""
+import operator
 from unittest import mock
 
 from abstract import ViURTestCase
@@ -311,3 +312,93 @@ class TestQueryIterCursors(ViURTestCase):
         self.assertEqual(({"name": "a", "_id": "1"}, {"name": "x", "_id": "9"}), seen[0])
         self.assertEqual(({"name": "b", "_id": "2"}, {"name": "x", "_id": "9"}), seen[1])
 
+
+class _FakeCollection:
+    """Just enough of a pymongo collection for keyset paging: ``find``/``sort``/``limit`` over plain dicts."""
+
+    _OPS = {"$gt": operator.gt, "$gte": operator.ge, "$lt": operator.lt, "$lte": operator.le}
+
+    def __init__(self, docs: list[dict]):
+        self.docs = docs
+
+    def index_information(self) -> dict:
+        return {}
+
+    def find(self, flt: dict, session=None) -> "_FakeCollection":
+        return _FakeCollection([doc for doc in self.docs if self._matches(doc, flt)])
+
+    def sort(self, sort: list[tuple[str, int]]) -> "_FakeCollection":
+        docs = list(self.docs)
+        for field, direction in reversed(sort):
+            docs.sort(key=lambda doc: doc[field], reverse=direction == -1)
+        return _FakeCollection(docs)
+
+    def limit(self, limit: int) -> "_FakeCollection":
+        return _FakeCollection(self.docs[:limit])
+
+    def __iter__(self):
+        return iter(self.docs)
+
+    @classmethod
+    def _matches(cls, doc: dict, flt: dict) -> bool:
+        for key, cond in flt.items():
+            if key == "$and":
+                ok = all(cls._matches(doc, part) for part in cond)
+            elif key == "$or":
+                ok = any(cls._matches(doc, part) for part in cond)
+            elif isinstance(cond, dict):
+                value = doc.get(key)
+                ok = all(value != arg if op == "$ne" else value is not None and cls._OPS[op](value, arg)
+                         for op, arg in cond.items())
+            else:
+                ok = doc.get(key) == cond
+            if not ok:
+                return False
+        return True
+
+
+class TestQueryIterInvertedOrder(ViURTestCase):
+    """An ``Inverted*`` order reads its start cursor inclusively; a task continuation must not, or it never ends."""
+
+    def _iterate(self, docs: list[dict], max_steps: int = 10) -> tuple[list[str], int]:
+        """Iterate *docs* by ``name``, ``InvertedAscending``, through the real transport and a fake collection.
+
+        :return: The names handled, in order, plus ``"finish"`` once finished, and the number of steps.
+        """
+        from viur.core import db, tasks, utils
+        from viur.core.db import transport
+
+        handled, payloads = [], []
+
+        class Collect(tasks.QueryIter):
+            @classmethod
+            def handleEntry(cls, entry, customData, kind):
+                handled.append(entry["name"])
+
+            @classmethod
+            def handleFinish(cls, totalCount, customData):
+                handled.append("finish")
+
+        steps = 0
+        with (
+            mock.patch.object(tasks.QueryIter, "_requeueStep",
+                              side_effect=lambda qry_dict: payloads.append(utils.json.dumps(qry_dict))),
+            mock.patch.object(transport, "get_collection", return_value=_FakeCollection(docs)),
+        ):
+            Collect.startIterOnQuery(db.Query("inverted-thing").order(("name", db.SortOrder.InvertedAscending)))
+            while payloads and steps < max_steps:
+                steps += 1
+                Collect._qryStep(utils.json.loads(payloads.pop(0)))
+        return handled, steps
+
+    def test_one_record(self):
+        handled, steps = self._iterate([{"_id": "1", "name": "a"}])
+        self.assertEqual(["a", "finish"], handled)
+        self.assertLess(steps, 10)
+
+    def test_several_records(self):
+        docs = [{"_id": str(i), "name": f"n{i}"} for i in range(12)]
+        handled, steps = self._iterate(docs)
+        self.assertEqual("finish", handled[-1])
+        self.assertEqual(sorted(doc["name"] for doc in docs), sorted(handled[:-1]))
+        self.assertLess(steps, 10)

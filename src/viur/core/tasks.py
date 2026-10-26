@@ -768,6 +768,13 @@ class MetaQueryIter(type):
         super(MetaQueryIter, cls).__init__(name, bases, dct)
 
 
+_FETCH_ORDER: t.Final[dict[db.SortOrder, db.SortOrder]] = {
+    db.SortOrder.InvertedAscending: db.SortOrder.Descending,
+    db.SortOrder.InvertedDescending: db.SortOrder.Ascending,
+}
+"""The plain order an ``Inverted*`` order fetches in (see ``db.utils.to_mongo_sort``)."""
+
+
 class QueryIter(object, metaclass=MetaQueryIter):
     """
         BaseClass to run a database Query and process each entry matched.
@@ -798,7 +805,11 @@ class QueryIter(object, metaclass=MetaQueryIter):
             "kind": query.kind,
             "srcSkel": query.srcSkel.kindName if query.srcSkel is not None else None,
             "filters": query.queries.filters,
-            "orders": [(propName, sortOrder.value) for propName, sortOrder in query.queries.orders],
+            # A step continues after the last row of the previous one. An Inverted* order reads its start cursor
+            # inclusively (for paging backwards) and would hand the same row to every step, so the iteration runs
+            # with the plain order of the same direction.
+            "orders": [(propName, _FETCH_ORDER.get(sortOrder, sortOrder).value)
+                       for propName, sortOrder in query.queries.orders],
             "startCursor": query.queries.startCursor,
             "endCursor": query.queries.endCursor,
             "origKind": query.origKind,
