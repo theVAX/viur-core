@@ -40,7 +40,12 @@ status: accepted
 - Without a `queueRegion` (local dev without `TASKS_EMULATOR`) and without an
   explicit `_call_deferred`, tasks run inline: appended to `req.pendingTasks`
   and executed after the response - or immediately when there is no request
-  (warmup). Behaviour differs from production.
+  (warmup). Behaviour differs from production. Only the development server
+  runs `pendingTasks`, so anywhere else a deferred call inside a request
+  raises `RuntimeError` instead of losing the task.
+- On App Engine the region comes from the metadata server (3 s timeout).
+  If that fails, `VIUR_TASKS_REGION` is used, then a guess from the
+  application id prefix (`h~`, `e~`); otherwise the region stays unknown.
 - Inside a task request the first `@CallDeferred` call runs directly instead
   of being queued: `_call_deferred` is cleared while
   `X-Appengine-Taskretrycount` is set and `DEFERRED_TASK_CALLED` is not yet

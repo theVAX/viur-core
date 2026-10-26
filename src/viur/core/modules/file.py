@@ -55,7 +55,8 @@ PRIVATE_BUCKET_NAME = f"""{_PROJECT_ID}.appspot.com"""
 PUBLIC_BUCKET_NAME = f"""public-dot-{_PROJECT_ID}"""
 PUBLIC_DLKEY_SUFFIX = "_pub"
 
-# bucket() makes no request; a missing bucket shows up on first access instead of as None here at import
+# bucket() makes no request. If the bucket is missing, blob lookups find nothing (download answers 410 Gone,
+# the thumbnailer skips the file) and uploads, reads and listings raise google.api_core.exceptions.NotFound.
 _private_bucket = GOOGLE_STORAGE_CLIENT.bucket(PRIVATE_BUCKET_NAME)
 _public_bucket = None
 

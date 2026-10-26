@@ -51,6 +51,61 @@ class TestCallDeferredDirectCall(ViURTestCase):
         request.pendingTasks.append.assert_not_called()
 
 
+class TestDeferWithoutQueueRegion(ViURTestCase):
+    """Without a queue region a deferred call inside a request becomes a pending task of that request.
+
+    Only the development server runs pending tasks after the response, so anywhere else the task would be lost.
+    """
+
+    _decorated_task = TestCallDeferredDirectCall._decorated_task
+
+    def _request(self) -> mock.MagicMock:
+        from viur.core import current
+
+        request = mock.MagicMock()
+        request.request.headers = {}
+        token = current.request.set(request)
+        self.addCleanup(current.request.reset, token)
+        return request
+
+    def test_development_server_keeps_the_task_for_after_the_request(self):
+        from viur.core import conf
+
+        tasks, record_call, calls = self._decorated_task()
+        request = self._request()
+        with mock.patch.object(tasks, "queueRegion", None), \
+                mock.patch.object(type(conf.instance), "is_dev_server", True):
+            record_call("c")
+
+        self.assertEqual([], calls)
+        request.pendingTasks.append.assert_called_once()
+
+    def test_elsewhere_the_call_fails_instead_of_losing_the_task(self):
+        from viur.core import conf
+
+        tasks, record_call, calls = self._decorated_task()
+        request = self._request()
+        with mock.patch.object(tasks, "queueRegion", None), \
+                mock.patch.object(type(conf.instance), "is_dev_server", False):
+            with self.assertRaisesRegex(RuntimeError, "VIUR_TASKS_REGION"):
+                record_call("d")
+
+        self.assertEqual([], calls)
+        request.pendingTasks.append.assert_not_called()
+
+    def test_query_iter_step_fails_instead_of_losing_the_task(self):
+        from viur.core import conf
+
+        tasks = self._decorated_task()[0]
+        request = self._request()
+        with mock.patch.object(tasks, "queueRegion", None), \
+                mock.patch.object(type(conf.instance), "is_dev_server", False):
+            with self.assertRaisesRegex(RuntimeError, "VIUR_TASKS_REGION"):
+                tasks.QueryIter._requeueStep({})
+
+        request.pendingTasks.append.assert_not_called()
+
+
 class TestRetryNTimesNotification(ViURTestCase):
     """The "task failed permanently" mail must actually be sent.
 
