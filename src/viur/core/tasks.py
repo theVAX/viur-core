@@ -51,7 +51,12 @@ if _gaeApp:
 
     try:
         headers = {"Metadata-Flavor": "Google"}
-        r = requests.get("http://metadata.google.internal/computeMetadata/v1/instance/region", headers=headers)
+        r = requests.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/region",
+            headers=headers,
+            timeout=3,  # seconds, like google-auth for its metadata requests; this runs at import time
+        )
+        r.raise_for_status()
         # r.text should be look like this "projects/(project-number)/region/(region)"
         # like so "projects/1234567890/region/europe-west3"
         queueRegion = r.text.split("/")[-1]

@@ -55,7 +55,8 @@ PRIVATE_BUCKET_NAME = f"""{_PROJECT_ID}.appspot.com"""
 PUBLIC_BUCKET_NAME = f"""public-dot-{_PROJECT_ID}"""
 PUBLIC_DLKEY_SUFFIX = "_pub"
 
-_private_bucket = GOOGLE_STORAGE_CLIENT.lookup_bucket(PRIVATE_BUCKET_NAME)
+# bucket() makes no request; a missing bucket shows up on first access instead of as None here at import
+_private_bucket = GOOGLE_STORAGE_CLIENT.bucket(PRIVATE_BUCKET_NAME)
 _public_bucket = None
 
 # FilePath is a descriptor for ViUR file components
