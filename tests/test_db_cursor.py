@@ -268,6 +268,69 @@ class TestCursorValues(ViURTestCase):
                 self.assertEqual({"owner": "me"}, find.call_args.args[1])
 
 
+
+class TestForgedCursorValues(ViURTestCase):
+    """The query hash binds a cursor to the shape of the query, not to its values: a client can forge any value.
+
+    A value must therefore reach MongoDB as a value. Before, the equality prefixes of the keyset chain carried it
+    bare, so an operator document such as ``{"$ne": None}`` was executed as an operator.
+    """
+
+    FORGED = ({"$ne": None}, {"$regex": "."}, {"$unknownOperator": 1}, {"$where": "true"})
+    COMPARISONS = {"$eq", "$gt", "$gte", "$lt", "$lte"}
+
+    def _mongo_filter(self, **cursors: dict) -> dict:
+        """The Mongo filter of a request carrying *cursors* (``cursor``/``endcursor``) with a valid query hash."""
+        from viur.core import db
+        shape = db.Query("thing").filter("owner =", "me").order("name").queries
+        query = db.Query("thing", _src_skel()).mergeExternalFilter(
+            {name: _token(after, shape) for name, after in cursors.items()})
+        query.filter("owner =", "me").order("name")
+        with mock.patch("viur.core.db.transport._find", return_value=[]) as find:
+            query.run()
+        return find.call_args.args[1]
+
+    def _operator_of(self, flt, forged: dict, parent: str | None = None) -> list[str | None]:
+        """The key directly above every occurrence of *forged* in *flt*: a field name, if it acts as an operator."""
+        if flt == forged:
+            return [parent]
+        if isinstance(flt, dict):
+            return [op for key, value in flt.items() for op in self._operator_of(value, forged, key)]
+        if isinstance(flt, list):
+            return [op for value in flt for op in self._operator_of(value, forged, parent)]
+        return []
+
+    def test_a_forged_start_cursor_value_stays_a_value(self):
+        forged = {"$ne": None}
+        self.assertEqual(
+            {"$and": [{"owner": "me"}, {"$or": [
+                {"name": {"$gt": forged}},
+                {"name": {"$eq": forged}, "_id": {"$gt": "1"}},
+            ]}]},
+            self._mongo_filter(cursor={"name": forged, "_id": "1"}),
+        )
+
+    def test_a_forged_end_cursor_value_stays_a_value(self):
+        forged = {"$ne": None}
+        self.assertEqual(
+            {"$and": [{"owner": "me"}, {"$or": [
+                {"$or": [{"name": {"$lt": forged}}, {"name": None}]},
+                {"name": {"$eq": forged}, "$or": [{"_id": {"$lte": "9"}}, {"_id": None}]},
+            ]}]},
+            self._mongo_filter(endcursor={"name": forged, "_id": "9"}),
+        )
+
+    def test_every_forged_value_is_an_operand_of_a_comparison(self):
+        for forged in self.FORGED:
+            for cursors in ({"cursor": {"name": forged, "_id": "1"}},
+                            {"endcursor": {"name": forged, "_id": "9"}},
+                            {"cursor": {"name": "a", "_id": forged}, "endcursor": {"name": forged, "_id": forged}}):
+                with self.subTest(forged=forged, cursors=cursors):
+                    operators = self._operator_of(self._mongo_filter(**cursors), forged)
+                    self.assertTrue(operators)
+                    self.assertLessEqual(set(operators), self.COMPARISONS)
+
+
 class TestQueryIterCursors(ViURTestCase):
     """``QueryIter`` hands the query to deferred tasks; its cursors must survive that round trip."""
 
@@ -348,7 +411,8 @@ class _FakeCollection:
                 ok = any(cls._matches(doc, part) for part in cond)
             elif isinstance(cond, dict):
                 value = doc.get(key)
-                ok = all(value != arg if op == "$ne" else value is not None and cls._OPS[op](value, arg)
+                ok = all(value != arg if op == "$ne" else value == arg if op == "$eq"
+                         else value is not None and cls._OPS[op](value, arg)
                          for op, arg in cond.items())
             else:
                 ok = doc.get(key) == cond
@@ -360,8 +424,18 @@ class _FakeCollection:
 class TestQueryIterInvertedOrder(ViURTestCase):
     """An ``Inverted*`` order reads its start cursor inclusively; a task continuation must not, or it never ends."""
 
-    def _iterate(self, docs: list[dict], max_steps: int = 10) -> tuple[list[str], int]:
-        """Iterate *docs* by ``name``, ``InvertedAscending``, through the real transport and a fake collection.
+    def _query(self, order, start: dict | None = None, end: dict | None = None):
+        """The query by ``name`` in *order*, with cursors on the rows *start* and *end*."""
+        from viur.core import db
+        query = db.Query("inverted-thing").order(("name", order))
+        if start or end:
+            query.setCursor(start and _token(start, query.queries), end and _token(end, query.queries))
+        return query
+
+    def _iterate(self, docs: list[dict], max_steps: int = 10, order=None, start: dict | None = None,
+                 end: dict | None = None) -> tuple[list[str], int]:
+        """Iterate *docs* by ``name`` (``InvertedAscending`` by default) through the real transport and a fake
+        collection.
 
         :return: The names handled, in order, plus ``"finish"`` once finished, and the number of steps.
         """
@@ -385,7 +459,7 @@ class TestQueryIterInvertedOrder(ViURTestCase):
                               side_effect=lambda qry_dict: payloads.append(utils.json.dumps(qry_dict))),
             mock.patch.object(transport, "get_collection", return_value=_FakeCollection(docs)),
         ):
-            Collect.startIterOnQuery(db.Query("inverted-thing").order(("name", db.SortOrder.InvertedAscending)))
+            Collect.startIterOnQuery(self._query(order or db.SortOrder.InvertedAscending, start, end))
             while payloads and steps < max_steps:
                 steps += 1
                 Collect._qryStep(utils.json.loads(payloads.pop(0)))
@@ -402,3 +476,32 @@ class TestQueryIterInvertedOrder(ViURTestCase):
         self.assertEqual("finish", handled[-1])
         self.assertEqual(sorted(doc["name"] for doc in docs), sorted(handled[:-1]))
         self.assertLess(steps, 10)
+
+    def test_the_cursors_bound_the_iteration_as_they_bound_the_query(self):
+        """The first step reads the start cursor as the query does (inclusively for an ``Inverted*`` order)."""
+        from viur.core import db
+        from viur.core.db import transport
+
+        docs = [{"_id": str(i), "name": f"n{i:02}"} for i in range(12)]
+        row = {i: {"name": doc["name"], "_id": doc["_id"]} for i, doc in enumerate(docs)}
+        cases = {
+            # InvertedAscending fetches descending, InvertedDescending ascending.
+            db.SortOrder.InvertedAscending: [(row[2], None), (row[9], None), (None, row[4]), (row[9], row[2])],
+            db.SortOrder.InvertedDescending: [(row[9], None), (row[2], None), (None, row[4]), (row[2], row[9])],
+        }
+        for order, cursors in cases.items():
+            for start, end in cursors:
+                with self.subTest(order=order, start=start, end=end):
+                    with mock.patch.object(transport, "get_collection", return_value=_FakeCollection(docs)):
+                        expected = sorted(doc["name"] for doc in self._query(order, start, end).run(100))
+                    handled, steps = self._iterate(docs, order=order, start=start, end=end)
+                    self.assertEqual("finish", handled[-1])
+                    self.assertEqual(expected, sorted(handled[:-1]))
+                    self.assertLess(steps, 10)
+
+    def test_a_start_cursor_on_the_second_row(self):
+        """``InvertedAscending`` from the cursor of row 2 shows rows 1 and 2; the iteration handles both."""
+        from viur.core import db
+        docs = [{"_id": str(i), "name": f"n{i}"} for i in (1, 2, 3)]
+        handled, _ = self._iterate(docs, order=db.SortOrder.InvertedAscending, start={"name": "n2", "_id": "2"})
+        self.assertEqual(["n1", "n2", "finish"], sorted(handled[:-1]) + handled[-1:])

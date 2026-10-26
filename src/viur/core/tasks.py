@@ -828,11 +828,7 @@ class QueryIter(object, metaclass=MetaQueryIter):
             "kind": query.kind,
             "srcSkel": query.srcSkel.kindName if query.srcSkel is not None else None,
             "filters": query.queries.filters,
-            # A step continues after the last row of the previous one. An Inverted* order reads its start cursor
-            # inclusively (for paging backwards) and would hand the same row to every step, so the iteration runs
-            # with the plain order of the same direction.
-            "orders": [(propName, _FETCH_ORDER.get(sortOrder, sortOrder).value)
-                       for propName, sortOrder in query.queries.orders],
+            "orders": [(propName, sortOrder.value) for propName, sortOrder in query.queries.orders],
             "startCursor": query.queries.startCursor,
             "endCursor": query.queries.endCursor,
             "origKind": query.origKind,
@@ -915,6 +911,11 @@ class QueryIter(object, metaclass=MetaQueryIter):
 
         if cursor := qry.queries.currentCursor:
             qryDict["startCursor"] = cursor
+            # The first step reads the start cursor as the query itself does. A continuation starts after the last
+            # row of the previous step; an Inverted* order reads its start cursor inclusively (for paging backwards)
+            # and would hand that row to every step again, so the following steps use the plain order of the same
+            # fetch direction.
+            qryDict["orders"] = [(name, _FETCH_ORDER.get(order, order).value) for name, order in qry.queries.orders]
             cls._requeueStep(qryDict)
         else:
             cls.handleFinish(qryDict["totalCount"], qryDict["customData"])

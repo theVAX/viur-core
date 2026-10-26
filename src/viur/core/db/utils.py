@@ -192,7 +192,8 @@ def after_condition(sort: list[tuple[str, int]], after: dict, *, inclusive: bool
     """The keyset continuation ``(a, b, ..., _id) > (va, vb, ..., vid)``, as an ``$or`` chain per sort field.
 
     *sort* is already the Mongo order from ``to_mongo_sort``, for an ``Inverted*`` order therefore the
-    direction actually queried. The equality prefixes match a missing field just like ``None``, and the
+    direction actually queried. The equality prefixes use ``$eq``, which matches a missing field just like
+    ``None`` and takes a cursor value (client input) only as a value, never as an operator document. The
     comparison per chain link comes from :func:`_range_condition`.
 
     :param inclusive: Make the last link (always ``_id``) inclusive — an ``Inverted*`` query reads the row that
@@ -201,7 +202,7 @@ def after_condition(sort: list[tuple[str, int]], after: dict, *, inclusive: bool
     clauses = []
     last = len(sort) - 1
     for i, (field, direction) in enumerate(sort):
-        prefix = {sort[j][0]: after[sort[j][0]] for j in range(i)}
+        prefix = {sort[j][0]: {"$eq": after[sort[j][0]]} for j in range(i)}
         is_last = inclusive and i == last
         if direction == 1:
             op = "$gte" if is_last else "$gt"
@@ -218,6 +219,8 @@ def _range_condition(field: str, op: str, value: t.Any) -> dict:
     missing field) forms its own, lowest bracket: ``$gt null`` matches nothing at all, not even real values,
     while ``$lt``/``$lte`` against a real value never match a missing field although it sorts below every
     real value. Both cases are rewritten here, every other combination is already correct as it stands.
+    *value* is always the operand of a comparison operator, so MongoDB takes an operator document there as a
+    plain value.
 
     :return: The condition; ``{}`` when the comparison constrains nothing.
     """
@@ -245,7 +248,7 @@ def before_condition(sort: list[tuple[str, int]], before: dict) -> dict:
     clauses = []
     last = len(sort) - 1
     for i, (field, direction) in enumerate(sort):
-        prefix = {sort[j][0]: before[sort[j][0]] for j in range(i)}
+        prefix = {sort[j][0]: {"$eq": before[sort[j][0]]} for j in range(i)}
         is_last = i == last
         if direction == 1:
             op = "$lte" if is_last else "$lt"
