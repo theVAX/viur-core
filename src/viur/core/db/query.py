@@ -494,8 +494,10 @@ class Query(object):
 
         after = after_hash = before = before_hash = None
         if startCursor:
+            self._startCursor = None  # an explicit cursor replaces the one taken from the request
             after, after_hash = _decode(startCursor)
         if endCursor:
+            self._endCursor = None
             before, before_hash = _decode(endCursor)
 
         if isinstance(self.queries, list):

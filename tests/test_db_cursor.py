@@ -92,6 +92,20 @@ class TestListCursor(ViURTestCase):
         self.assertEqual({"name": "b", "_id": "2"}, run_single_filter.call_args.args[0].startCursor)
 
 
+    def test_an_explicit_set_cursor_wins_over_the_request(self):
+        """Before the cursor was deferred, ``setCursor`` after ``mergeExternalFilter`` replaced the request's one."""
+        from viur.core import db
+
+        first, _ = self._list_page({}, returns=[{"_id": "1", "name": "a"}])
+        second, _ = self._list_page({}, returns=[{"_id": "2", "name": "b"}])
+        query = db.Query("thing", _src_skel()).mergeExternalFilter({"cursor": first.getCursor()})
+        query.filter("owner =", "me").order("name")
+        query.setCursor(second.getCursor())
+        with mock.patch("viur.core.db.query.run_single_filter", return_value=[]) as run_single_filter:
+            query.run()
+        self.assertEqual({"name": "b", "_id": "2"}, run_single_filter.call_args.args[0].startCursor)
+
+
 class TestLimitOneCursor(ViURTestCase):
     """A list page with ``limit=1`` needs a cursor like any other page; only ``getEntry()`` may skip the sort."""
 
