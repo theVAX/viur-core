@@ -40,6 +40,24 @@ class TestEqualityNextToOtherOperators(ViURTestCase):
         self.assertEqual({"$or": [{"name": "a"}, {"name": "b"}]},
                          to_mongo_filter({}, [[("name =", "a"), ("name =", "b")]]))
 
+    def test_a_key_list_from_the_request_next_to_an_id_in_restriction(self):
+        """``KeyBone`` puts ``_id =`` into every sub-query next to the ``_id IN`` of a ``listFilter``."""
+        from viur.core import db
+        from viur.core.bones import KeyBone
+        from viur.core.db.utils import to_mongo_filter
+        from viur.core.skeleton import SkeletonInstance
+
+        class FakeSkelCls:
+            kindName = "thing"
+            __boneMap__ = {}
+
+        bone = KeyBone()
+        bone.__set_name__(FakeSkelCls, "key")
+        query = db.Query("thing", SkeletonInstance(FakeSkelCls, bone_map={"key": bone})).filter("_id IN", ["allowed"])
+        query.mergeExternalFilter({"key": ["forbidden"]})
+        self.assertEqual([{"_id": {"$in": ["allowed"], "$eq": "forbidden"}}],
+                         [to_mongo_filter(qd.filters, qd.or_filters) for qd in query.queries])
+
     def test_repeated_equality_next_to_another_operator(self):
         from viur.core.db.utils import to_mongo_filter
         self.assertEqual({"tags": {"$all": ["a", "b"], "$nin": ["c"]}},
