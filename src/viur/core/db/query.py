@@ -72,7 +72,9 @@ def _entryMatchesQuery(
     for filterStr, filterValue in singleFilter.items():
         field, opcode = filterStr.split(" ")
         entryValue = entry.get(field)
-        if not doesMatch(entryValue, filterValue, opcode):
+        # Several bounds with the same range operator arrive as a list, see utils.to_mongo_filter.
+        bounds = filterValue if opcode in utils._INEQUALITY_OPS and isinstance(filterValue, list) else [filterValue]
+        if not all(doesMatch(entryValue, bound, opcode) for bound in bounds):
             return False
 
     if or_filters:
