@@ -116,9 +116,10 @@ def to_mongo_filter(filters: dict, or_filters: list) -> dict:
 
     Several ``=`` on the same field arrive as a list (``Query.filter`` appends them) and mean AND, which is
     ``$all`` in Mongo. Several bounds with the same range operator (``<``, ``<=``, ``>``, ``>=``) arrive as a list
-    the same way and become one condition each, AND-ed via ``$and``. ``=`` next to another operator on the same
-    field becomes ``$eq`` in that field's operator dict, so neither replaces the other; a lone ``=`` stays a plain
-    value. *or_filters* is a list of groups: OR inside a group, AND between the groups.
+    the same way and become one condition each, AND-ed via ``$and``. An empty list matches nothing in both cases.
+    ``=`` next to another operator on the same field becomes ``$eq`` in that field's operator dict, so neither
+    replaces the other; a lone ``=`` stays a plain value. *or_filters* is a list of groups: OR inside a group, AND
+    between the groups.
 
     :param filters: The viur AND filters.
     :param or_filters: The viur OR groups.
@@ -129,7 +130,8 @@ def to_mongo_filter(filters: dict, or_filters: list) -> dict:
     for key, value in filters.items():
         field, op = _split(key)
         if op in _INEQUALITY_OPS and isinstance(value, list):
-            groups += [{field: {_OPS[op]: bound}} for bound in value]
+            # An empty list of bounds is unsatisfiable, as ``$all: []`` is for ``=``; ``$in: []`` matches nothing.
+            groups += [{field: {_OPS[op]: bound}} for bound in value] or [{field: {"$in": []}}]
             continue
         if op == "=":
             mongo_op = "$all" if isinstance(value, list) else "$eq"
