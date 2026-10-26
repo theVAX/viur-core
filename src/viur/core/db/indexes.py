@@ -272,15 +272,18 @@ def apply(
 def equality_fields(flt: dict) -> frozenset[str]:
     """The fields of the Mongo filter *flt* holding a plain equality value — the index prefix.
 
-    Looks into ``$and`` as well, where ``utils.to_mongo_filter`` puts the AND filters next to OR groups.
+    Looks into ``$and`` as well, where ``utils.to_mongo_filter`` puts the AND filters next to OR groups, and counts
+    an operator dict with ``$eq`` (``=`` next to another operator on the same field).
     """
-    # Neither an operator dict nor an ``$or`` counts; everything else is filtered residually.
+    # Neither another operator dict nor an ``$or`` counts; everything else is filtered residually.
     fields = set()
     for field, value in flt.items():
         if field == "$and":
             for part in value:
                 fields |= equality_fields(part)
-        elif not field.startswith("$") and not (isinstance(value, dict) and any(k.startswith("$") for k in value)):
+        elif not field.startswith("$") and (
+            not (isinstance(value, dict) and any(k.startswith("$") for k in value)) or "$eq" in value
+        ):
             fields.add(field)
     return frozenset(fields)
 

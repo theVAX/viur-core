@@ -26,6 +26,15 @@ class TestEqualityFields(ViURTestCase):
         flt = to_mongo_filter({"current_key =": "k", "a =": 1}, [*OR_GROUP, [("n >", 1), ("n <", 0)]])
         self.assertEqual({"current_key", "a"}, equality_fields(flt))
 
+    def test_an_explicit_eq_next_to_another_operator(self):
+        from viur.core.db.indexes import equality_fields
+        from viur.core.db.utils import to_mongo_filter
+        flt = to_mongo_filter({"current_key =": "k", "current_key IN": ["k", "x"]}, [])
+        self.assertEqual({"current_key": {"$eq": "k", "$in": ["k", "x"]}}, flt)
+        self.assertEqual({"current_key"}, equality_fields(flt))
+        self.assertEqual({"current_key"}, equality_fields(to_mongo_filter(
+            {"current_key =": "k", "current_key IN": ["k", "x"]}, OR_GROUP)))
+
     def test_an_or_group_contributes_nothing(self):
         from viur.core.db.indexes import equality_fields
         from viur.core.db.utils import to_mongo_filter
@@ -36,13 +45,18 @@ class TestEqualityFields(ViURTestCase):
 class TestSortElisionNextToAnOrGroup(ViURTestCase):
 
     def test_the_index_with_the_equality_prefix_is_hinted(self):
+        self._assert_hinted({"current_key =": "k"})
+
+    def test_the_index_with_the_equality_prefix_is_hinted_for_eq_next_to_another_operator(self):
+        self._assert_hinted({"current_key =": "k", "current_key IN": ["k", "x"]})
+
+    def _assert_hinted(self, filters: dict):
         from viur.core.db import indexes, transport
         from viur.core.db.types import QueryDefinition, QueryOrder, SortOrder
 
         spec = (("current_key", 1), ("timestamp", -1), ("_id", -1))
         query = QueryDefinition(
-            "viur-history", {"current_key =": "k"}, [QueryOrder("timestamp", SortOrder.Descending)],
-            or_filters=OR_GROUP,
+            "viur-history", filters, [QueryOrder("timestamp", SortOrder.Descending)], or_filters=OR_GROUP,
         )
         collection = mock.MagicMock()
         cursor = collection.find.return_value.hint.return_value.limit.return_value
