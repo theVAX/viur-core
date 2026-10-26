@@ -1,8 +1,9 @@
 """
 Tests for GoogleAccount.login:
   An existing user is matched by the Google user ID ("sub") first and by e-mail only when Google
-  verified the address; no account is entered or created with an unverified e-mail; the
-  gsuite domain rule relies on the "hd" claim, not on the e-mail suffix.
+  verified the address; no account is entered or created with an unverified e-mail; the first
+  match by e-mail binds the user to that Google account, in the same transaction that checks no
+  other account is bound; the gsuite domain rule relies on the "hd" claim, not on the e-mail suffix.
 """
 import os
 import sys
@@ -20,12 +21,29 @@ class FakeRecord(dict):
         return None
 
 
+class FakeUser(FakeRecord):
+    """A user found by a query, read from its stored entry."""
+
+    def __init__(self, stored: dict):
+        super().__init__(stored)
+        self.stored = stored
+
+    def patch(self, values):
+        """Like Skeleton.patch: read the stored entry again, change it and write it back in one transaction."""
+        self.clear()
+        self.update(self.stored)
+        values(self)
+        self.stored.update(self)
+        return self
+
+
 class FakeSkel(FakeRecord):
     """Stands in for the user skeleton and its query; only what GoogleAccount.login touches."""
 
-    def __init__(self, users: list[dict]):
+    def __init__(self, users: list[dict], written_meanwhile: dict | None = None):
         super().__init__(sync=True)
-        self.users = [FakeRecord(user) for user in users]
+        self.users = users  # the stored entries; they keep the changes of a login
+        self.written_meanwhile = written_meanwhile or {}
         self.filters = []
         self.match = None
         self.written = False
@@ -40,7 +58,12 @@ class FakeSkel(FakeRecord):
         return self
 
     def getSkel(self):
-        return self.match
+        if self.match is None:
+            return None
+        user = FakeUser(self.match)
+        # A concurrent login writes to the stored user after this lookup.
+        self.match.update(self.written_meanwhile)
+        return user
 
     def write(self):
         self.written = True
@@ -76,8 +99,8 @@ class TestGoogleLogin(ViURTestCase):
         conf.user.google_client_id, conf.user.google_gsuite_domains = self._conf_backup
         super().tearDown()
 
-    def _login(self, user_info: dict, users: list[dict]) -> None:
-        self.skel = FakeSkel(users)
+    def _login(self, user_info: dict, users: list[dict], written_meanwhile: dict | None = None) -> None:
+        self.skel = FakeSkel(users, written_meanwhile)
         self.provider._user_module.baseSkel.return_value = self.skel
         with mock.patch("google.oauth2.id_token.verify_oauth2_token", return_value=user_info) as self.verify:
             self.provider.login._func(self.provider, token="token")
@@ -86,12 +109,12 @@ class TestGoogleLogin(ViURTestCase):
         self.provider._user_module.continueAuthenticationFlow.assert_called_once()
         return self.provider._user_module.continueAuthenticationFlow.call_args.args[1]
 
-    def _assert_refused(self, user_info: dict, users: list[dict]) -> None:
-        """The login is refused before any user is looked up, created, changed or logged in."""
+    def _assert_refused(self, user_info: dict, users: list[dict], written_meanwhile: dict | None = None) -> None:
+        """The login is refused; no user is created or logged in."""
         from viur.core import errors
         self.provider._user_module.reset_mock()
         with self.assertRaises(errors.Forbidden):
-            self._login(user_info, users)
+            self._login(user_info, users, written_meanwhile)
         self.assertFalse(self.skel.written)
         self.provider._user_module.continueAuthenticationFlow.assert_not_called()
 
@@ -132,6 +155,34 @@ class TestGoogleLogin(ViURTestCase):
             [{"key": "jane", "name": "jane@example.com", "uid": "google-sub-2", "sync": True}],
         )
         self.assertEqual(self.skel.filters, ["uid =", "name.idx ="])
+
+    def test_first_email_match_binds_google_account(self):
+        users = [{"key": "jane", "name": "jane@example.com", "sync": True}]
+        self._login(_token(given_name="Jane", family_name="Doe"), users)
+        self.assertEqual(self._logged_in_key(), "jane")
+        self.assertEqual(
+            (users[0]["uid"], users[0]["firstname"], users[0]["lastname"]),
+            ("google-sub-1", "Jane", "Doe"),
+        )
+
+    def test_first_email_match_binds_google_account_without_sync(self):
+        users = [{"key": "jane", "name": "Jane@Example.com", "sync": False}]
+        self._login(_token(given_name="Jane"), users)
+        self.assertEqual(self._logged_in_key(), "jane")
+        self.assertEqual(users[0], {"key": "jane", "name": "Jane@Example.com", "sync": False, "uid": "google-sub-1"})
+
+    def test_other_google_account_with_same_email_is_refused_after_first_login(self):
+        users = [{"key": "jane", "name": "jane@example.com", "sync": True}]
+        self._login(_token(), users)  # sub "google-sub-1"
+        self._assert_refused(_token(sub="google-sub-2"), users)
+        self.assertEqual(self.skel.filters, ["uid =", "name.idx ="])
+        self.assertEqual(users[0]["uid"], "google-sub-1")
+
+    def test_concurrent_first_login_of_other_google_account_wins(self):
+        # The lookup sees no uid, but another Google account binds the user before this login writes.
+        users = [{"key": "jane", "name": "jane@example.com", "sync": True}]
+        self._assert_refused(_token(given_name="Mallory"), users, written_meanwhile={"uid": "google-sub-2"})
+        self.assertEqual(users[0], {"key": "jane", "name": "jane@example.com", "sync": True, "uid": "google-sub-2"})
 
     def test_existing_user_is_matched_by_uid_first(self):
         self._login(

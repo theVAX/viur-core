@@ -724,6 +724,30 @@ class GoogleAccount(UserPrimaryAuthentication):
         uid = user_info["sub"]
         email = user_info["email"]
 
+        def take_over(skel: skeleton.SkeletonInstance) -> bool:
+            """Takes user information from Google, if wanted; returns whether a bone changed."""
+            changed = False
+            if skel["sync"]:
+                for target, source in {
+                    "name": email,
+                    "firstname": user_info.get("given_name"),
+                    "lastname": user_info.get("family_name"),
+                }.items():
+
+                    if skel[target] != source:
+                        skel[target] = source
+                        changed = True
+
+            return changed
+
+        def bind(skel: skeleton.SkeletonInstance) -> None:
+            """Binds the user to this Google account, unless another one is bound already."""
+            if skel["uid"] and skel["uid"] != uid:
+                raise errors.Forbidden("This user is bound to another Google account")
+
+            skel["uid"] = uid
+            take_over(skel)
+
         base_skel = self._user_module.baseSkel()
         update = False
         if not (user_skel := base_skel.all().filter("uid =", uid).getSkel()):
@@ -742,20 +766,15 @@ class GoogleAccount(UserPrimaryAuthentication):
                 user_skel["name"] = email
                 update = True
 
-            elif user_skel["uid"] and user_skel["uid"] != uid:
-                raise errors.Forbidden("This user is bound to another Google account")
+            else:
+                # First match by e-mail: bind the user to this Google account, so that from now on it is found by
+                # "uid" and other Google accounts with this e-mail are refused. patch() reads the user again, checks
+                # and writes in one transaction, so of two concurrent first logins only one can bind its account.
+                user_skel.patch(bind)
 
         # Take user information from Google, if wanted!
-        if user_skel["sync"]:
-            for target, source in {
-                "name": email,
-                "firstname": user_info.get("given_name"),
-                "lastname": user_info.get("family_name"),
-            }.items():
-
-                if user_skel[target] != source:
-                    user_skel[target] = source
-                    update = True
+        if take_over(user_skel):
+            update = True
 
         if update:
             assert user_skel.write()
