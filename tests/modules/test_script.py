@@ -44,6 +44,29 @@ class TestScriptRootNodes(ViURTestCase):
                     [{"name": "Scripts", "key": "rep_module_repo"}],
                 )
 
+    def _unsatisfiable_list_filter(self):
+        """An overridden listFilter that narrows the query down to nothing instead of returning None."""
+        from viur.core import current
+        from viur.core.modules.script import Script
+
+        def list_filter(module, query):
+            query.queries = None
+            return query
+
+        current.user.set({"access": ["script-view"]})
+        return mock.patch.object(Script, "listFilter", list_filter)
+
+    def test_unsatisfiable_list_filter_offers_no_root_node(self):
+        with self._unsatisfiable_list_filter():
+            self.assertEqual(self.script.getAvailableRootNodes(), [])
+        self.rootnode.assert_not_called()
+
+    def test_get_importable_refuses_unsatisfiable_list_filter(self):
+        from viur.core import errors
+        with self._unsatisfiable_list_filter(), self.assertRaises(errors.Unauthorized):
+            self.script.get_importable()
+        self.rootnode.assert_not_called()
+
     def test_list_root_nodes_and_index_refuse_without_script_view(self):
         from viur.core import current, errors
         current.user.set({"access": ["admin"]})
