@@ -244,6 +244,12 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
 
     def make_request():
         headers = {"Content-Type": "application/json"}
+        if conf.file_thumbnailer_auth == "id_token":  # for a function that only its invokers may call
+            from google.auth.transport.requests import Request  # not `import google…`: google would become local
+            from google.oauth2.id_token import fetch_id_token
+
+            token = fetch_id_token(Request(), conf.file_thumbnailer_url)
+            headers["Authorization"] = f"Bearer {token}"
         data_str = base64.b64encode(json.dumps(dataDict).encode("UTF-8"))
         sig = conf.main_app.file.hmac_sign(data_str)
         datadump = json.dumps({"dataStr": data_str.decode('ASCII'), "sign": sig})

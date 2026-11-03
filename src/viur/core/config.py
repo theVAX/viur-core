@@ -957,6 +957,11 @@ class Conf(ConfigType):
     file_derivations: dict[str, t.Callable[["SkeletonInstance", dict, dict], list[tuple[str, float, str, t.Any]]]] = {}
     """Call-Map for file pre-processors"""
 
+    file_thumbnailer_auth: t.Optional[t.Literal["id_token"]] = None
+    """How ``cloudfunction_thumbnailer`` authenticates at ``file_thumbnailer_url``. ``None`` sends no credentials (the
+    function must allow unauthenticated calls); ``"id_token"`` sends a Google ID token of the app's service account
+    with ``file_thumbnailer_url`` as audience, so the function can be restricted to invokers with ``run.invoker``."""
+
     file_thumbnailer_url: t.Optional[str] = None
     # TODO: """docstring"""
 
