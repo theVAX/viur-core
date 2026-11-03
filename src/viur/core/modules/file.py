@@ -159,7 +159,7 @@ def thumbnailer(fileSkel, existingFiles, params):
             target_filename = f"thumbnail-{width}-{height}.{file_extension}"
 
         elif "width" in info:
-            width = info["width"]
+            width = min(info["width"], img.size[0])  # never enlarge: a narrower image keeps its own width
             height = int((float(img.size[1]) * float(width / float(img.size[0]))))
             target_filename = f"thumbnail-w{width}.{file_extension}"
 
