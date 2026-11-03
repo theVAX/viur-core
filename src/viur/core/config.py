@@ -956,6 +956,11 @@ class Conf(ConfigType):
     file_hmac_key: str = None
     """Hmac-Key used to sign download urls - set automatically"""
 
+    file_thumbnailer_hmac_key: t.Optional[bytes] = None
+    """Hmac-Key used to sign calls of ``cloudfunction_thumbnailer``. Set it to a key of its own: the function has to
+    know this key, and with ``file_hmac_key`` it could sign download urls and upload contexts of the app. Falls back
+    to ``file_hmac_key`` when unset."""
+
     # TODO: separate this type hints and use it in the File module as well
     file_derivations: dict[str, t.Callable[["SkeletonInstance", dict, dict], list[tuple[str, float, str, t.Any]]]] = {}
     """Call-Map for file pre-processors"""
