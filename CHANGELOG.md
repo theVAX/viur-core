@@ -32,6 +32,14 @@ This file documents any relevant changes done to ViUR-core since version 3.
 - [Breaking] feat: `Formmailer` sends in `add`; `canUse()` is `canAdd(skel)`, `onAdded` is `thenAdd`
 - [Breaking] chore: `add_or_edit` is guarded by `canAddOrEdit` instead of `@access("root")`
 - fix: `IN`/`NOT_IN` filter values given as `set`/`frozenset` reach MongoDB as a list (#1786 for MongoDB)
+- [Breaking] chore: No image processing inside the app process: decoding uploaded images with Pillow in the web
+  service is an attack surface (decompression bombs, parser bugs) and blocks an instance. Removed are the deriver
+  `viur.core.modules.file.thumbnailer`, `File.set_image_meta` (run from `File.thenAdd` for every uploaded image) and
+  `File.IMAGE_META_MAX_SIZE`; `pillow` is no longer a dependency of viur-core. `width` and `height` of an uploaded
+  image stay empty unless the project sets them. Migration: use serving URLs (`FileBone(..., public=True)`,
+  `serving_url`) for resized images, or run `cloudfunction_thumbnailer` (`conf.file_thumbnailer_url`,
+  https://github.com/viur-framework/viur-cloudfunctions/tree/main/thumbnailer) as the deriver instead of
+  `thumbnailer`, e.g. `conf.file_derivations = {"thumbnail": cloudfunction_thumbnailer}`
 
 ## [3.9.4]
 

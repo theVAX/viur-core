@@ -7,9 +7,6 @@ import html
 import io
 import json
 import logging
-import PIL
-import PIL.Image
-import PIL.ImageCms
 import re
 import requests
 import string
@@ -109,87 +106,6 @@ def importBlobFromViur2(dlKey, fileName):
     marker["dlurl"] = conf.main_app.file.create_download_url(dlKey, fileName, False, None)
     db.put("viur-viur2-blobimport", marker)
     return marker["dlurl"]
-
-
-def thumbnailer(fileSkel, existingFiles, params):
-    file_name = html.unescape(fileSkel["name"])
-    bucket = conf.main_app.file.get_bucket(fileSkel["dlkey"])
-
-    blob = bucket.get_blob(f"""{fileSkel["dlkey"]}/source/{file_name}""")
-    if not blob:
-        logging.warning(f"""Blob {fileSkel["dlkey"]}/source/{file_name} is missing from cloud storage!""")
-        return
-
-    source = io.BytesIO()
-    blob.download_to_file(source)
-
-    result = []
-
-    for info in params:
-        # Read the image into PIL
-        try:
-            source.seek(0)
-            img = PIL.Image.open(source)
-        except PIL.Image.UnidentifiedImageError:  # Can't load this image; so there's no need to try other resolutions
-            break
-
-        if icc_profile := img.info.get("icc_profile"):
-            # JPEGs might be encoded with a non-standard color-profile; we need to compensate for this if we convert
-            # to WEBp as we'll loose this color-profile information
-            f = io.BytesIO(icc_profile)
-            src_profile = PIL.ImageCms.ImageCmsProfile(f)
-            dst_profile = PIL.ImageCms.createProfile("sRGB")
-            try:
-                img = PIL.ImageCms.profileToProfile(
-                    img,
-                    inputProfile=src_profile,
-                    outputProfile=dst_profile,
-                    outputMode="RGBA" if img.has_transparency_data else "RGB")
-            except Exception as e:
-                logging.debug(f"{info=}")
-                logging.exception(e)
-                continue
-
-        file_extension = info.get("fileExtension", "webp")
-        mimetype = info.get("mimeType", "image/webp")
-
-        if "width" in info and "height" in info:
-            width = info["width"]
-            height = info["height"]
-            target_filename = f"thumbnail-{width}-{height}.{file_extension}"
-
-        elif "width" in info:
-            width = info["width"]
-            height = int((float(img.size[1]) * float(width / float(img.size[0]))))
-            target_filename = f"thumbnail-w{width}.{file_extension}"
-
-        else:  # No default fallback - ignore
-            continue
-
-        # Create resized version of the source
-        target = io.BytesIO()
-
-        try:
-            img = img.resize((width, height), PIL.Image.LANCZOS)
-        except ValueError as e:
-            # Usually happens to some files, like TIFF-images.
-            logging.debug(f"{info=}")
-            logging.exception(e)
-            break
-
-        img.save(target, file_extension)
-
-        # Safe derived target file
-        target_size = target.tell()
-        target.seek(0)
-        target_blob = bucket.blob(f"""{fileSkel["dlkey"]}/derived/{target_filename}""")
-        target_blob.upload_from_file(target, content_type=mimetype)
-
-        result.append(
-            (target_filename, target_size, mimetype, {"mimetype": mimetype, "width": width, "height": height})
-        )
-
-    return result
 
 
 def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
@@ -515,10 +431,6 @@ class File(Tree):
     DOWNLOAD_URL_PREFIX = "/file/download/"
     INTERNAL_SERVING_URL_PREFIX = "/file/serve/"
     MAX_FILENAME_LEN = 256
-    IMAGE_META_MAX_SIZE: t.Final[int] = 10 * 1024 ** 2
-    """Maximum size of image files that should be analysed in :meth:`set_image_meta`.
-    Default: 10 MiB"""
-
     leafSkelCls = FileLeafSkel
     nodeSkelCls = FileNodeSkel
 
@@ -1332,51 +1244,6 @@ class File(Tree):
 
             bucket.copy_blob(old_blob, bucket, new_path, if_generation_match=0)
             bucket.delete_blob(old_path)
-
-    def thenAdd(self, skel: SkeletonInstance) -> None:
-        if self.skel_type_of(skel) == "leaf" and skel["mimetype"].startswith("image/"):
-            if skel["size"] > self.IMAGE_META_MAX_SIZE:
-                logging.warning(f"File size {skel['size']} exceeds limit {self.IMAGE_META_MAX_SIZE=}")
-                return
-            self.set_image_meta(skel["key"])
-
-        super().thenAdd(skel)
-
-    @CallDeferred
-    def set_image_meta(self, key: str) -> None:
-        """Write image metadata (height and width) to FileSkel"""
-        skel = self.editSkel("leaf", key)
-
-        if not skel.read(key):
-            logging.error(f"File {key} does not exist")
-            return
-
-        if skel["width"] and skel["height"]:
-            logging.info(f'File {skel["key"]} has already {skel["width"]=} and {skel["height"]=}')
-            return
-
-        file_name = html.unescape(skel["name"])
-        blob = self.get_bucket(skel["dlkey"]).get_blob(f"""{skel["dlkey"]}/source/{file_name}""")
-        if not blob:
-            logging.error(f'Blob {skel["dlkey"]}/source/{file_name} is missing in Cloud Storage!')
-            return
-
-        file_obj = io.BytesIO()
-        blob.download_to_file(file_obj)
-        file_obj.seek(0)
-
-        try:
-            img = PIL.Image.open(file_obj)
-        except PIL.Image.UnidentifiedImageError as e:  # Can't load this image
-            logging.exception(f'Cannot open {skel["key"]} | {skel["name"]} to set image meta data: {e}')
-            return
-
-        skel.patch(
-            values={
-                "width": img.width,
-                "height": img.height,
-            },
-        )
 
     def mark_for_deletion(self, dlkey: str) -> None:
         """
