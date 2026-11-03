@@ -245,7 +245,10 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
     def make_request():
         headers = {"Content-Type": "application/json"}
         data_str = base64.b64encode(json.dumps(dataDict).encode("UTF-8"))
-        sig = conf.main_app.file.hmac_sign(data_str)
+        if key := conf.file_thumbnailer_hmac_key:  # a key of its own: the function cannot sign app download urls
+            sig = hmac.new(key, msg=data_str, digestmod=hashlib.sha3_384).hexdigest()
+        else:
+            sig = conf.main_app.file.hmac_sign(data_str)
         datadump = json.dumps({"dataStr": data_str.decode('ASCII'), "sign": sig})
         resp = requests.post(conf.file_thumbnailer_url, data=datadump, headers=headers, allow_redirects=False)
         if resp.status_code != 200:  # Error Handling
