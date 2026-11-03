@@ -109,7 +109,7 @@ def importBlobFromViur2(dlKey, fileName):
     return marker["dlurl"]
 
 
-def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
+def cloudfunction_thumbnailer(fileSkel, existingFiles, params, *, report_unreadable: bool = False):
     """External Thumbnailer for images.
 
     The corresponding cloudfunction can be found here .
@@ -133,6 +133,10 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
     .. code-block:: python
 
         test = FileBone(derive=conf.derives_pdf)
+
+    Failures are logged and give ``None``. With *report_unreadable* a source the function reports as unreadable
+    (HTTP 422: no image it can decode) raises :class:`errors.UnprocessableEntity` instead, so a caller can reject the
+    file rather than treat it like an outage of the function.
    """
 
     if not conf.file_thumbnailer_url:
@@ -174,6 +178,8 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
             sig = conf.main_app.file.hmac_sign(data_str)
         datadump = json.dumps({"dataStr": data_str.decode('ASCII'), "sign": sig})
         resp = requests.post(conf.file_thumbnailer_url, data=datadump, headers=headers, allow_redirects=False)
+        if resp.status_code == 422 and report_unreadable:
+            raise errors.UnprocessableEntity(f"The thumbnailer cannot read the source: {resp.text}")
         if resp.status_code != 200:  # Error Handling
             match resp.status_code:
                 case 302:
