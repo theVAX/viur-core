@@ -963,6 +963,11 @@ class Conf(ConfigType):
     file_thumbnailer_url: t.Optional[str] = None
     # TODO: """docstring"""
 
+    file_thumbnailer_base_url: t.Optional[str] = None
+    """Base URL the thumbnailer cloud function puts in front of a relative source URL. Only used on the
+    development server, where the source is a relative download URL; defaults to the host of the request there.
+    Outside the development server the source is an absolute signed URL and no base URL is sent."""
+
     main_app: "Module" = None
     """Reference to our pre-build Application-Instance"""
 

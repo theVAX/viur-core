@@ -285,7 +285,9 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
         "name": fileSkel["name"],
         "params": params,
         "minetype": fileSkel["mimetype"],
-        "baseUrl": current.request.get().request.host_url.lower(),
+        # The Host header is chosen by the client; the function trusts this host, so only use it on the dev server
+        "baseUrl": (conf.file_thumbnailer_base_url or current.request.get().request.host_url.lower())
+        if conf.instance.is_dev_server else "",
         "targetKey": fileSkel["dlkey"],
         "nameOnly": True
     }
