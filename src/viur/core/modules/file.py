@@ -247,7 +247,12 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
         data_str = base64.b64encode(json.dumps(dataDict).encode("UTF-8"))
         sig = conf.main_app.file.hmac_sign(data_str)
         datadump = json.dumps({"dataStr": data_str.decode('ASCII'), "sign": sig})
-        resp = requests.post(conf.file_thumbnailer_url, data=datadump, headers=headers, allow_redirects=False)
+        try:
+            resp = requests.post(conf.file_thumbnailer_url, data=datadump, headers=headers, allow_redirects=False,
+                                 timeout=conf.file_thumbnailer_timeout)
+        except requests.Timeout as e:
+            logging.error(f"cloudfunction_thumbnailer timed out after {conf.file_thumbnailer_timeout} s: {e}")
+            return
         if resp.status_code != 200:  # Error Handling
             match resp.status_code:
                 case 302:

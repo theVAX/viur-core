@@ -960,6 +960,11 @@ class Conf(ConfigType):
     file_thumbnailer_url: t.Optional[str] = None
     # TODO: """docstring"""
 
+    file_thumbnailer_timeout: float = 30
+    """Seconds ``cloudfunction_thumbnailer`` waits for a connection to ``file_thumbnailer_url`` and for each part of
+    its answer (``timeout`` of ``requests``). A timeout is logged and gives ``None``, like any other failure of the
+    function; a hanging function no longer holds the request of the app until the platform ends it."""
+
     main_app: "Module" = None
     """Reference to our pre-build Application-Instance"""
 
