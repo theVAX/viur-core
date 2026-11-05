@@ -30,6 +30,21 @@ from viur.core.tasks import _appengineServiceIPs
 
 TEMPLATE_STYLE_KEY = "style"
 
+# Printable ASCII except "%" is kept as is in the x-viur-error header; everything else gets percent-encoded.
+_ERROR_HEADER_SAFE = "".join(chr(c) for c in range(0x20, 0x7F) if c != ord("%"))
+
+
+def _error_header_value(descr: str) -> str:
+    """
+    Turn an exception description into a value for the x-viur-error header.
+
+    gunicorn rejects a header value with a character outside Latin-1 (such as an en dash), and the client
+    then gets a 502 instead of the actual error; control characters would allow header injection. So the
+    UTF-8 text is percent-encoded (RFC 3986) except for printable ASCII: an ASCII description without "%"
+    stays as is, and ``decodeURIComponent()`` or ``urllib.parse.unquote()`` restores any description.
+    """
+    return quote(descr.replace("\n", ""), safe=_ERROR_HEADER_SAFE)
+
 
 class RequestValidator(ABC):
     """
@@ -416,7 +431,7 @@ class Router:
                 self.response.status = f"{e.status} {e.name}"
                 # Set machine-readable x-viur-error response header in case there is an exception description.
                 if e.descr:
-                    self.response.headers["x-viur-error"] = e.descr.replace("\n", "")
+                    self.response.headers["x-viur-error"] = _error_header_value(e.descr)
             else:
                 self.response.status = 500
                 logging.error("ViUR has caught an unhandled exception!")
