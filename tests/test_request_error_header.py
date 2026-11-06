@@ -80,17 +80,21 @@ class TestRouterErrorHeader(ViURTestCase):
         self.addCleanup(csp_patcher.stop)
 
     @staticmethod
-    def _request(descr) -> webob.Response:
+    def _request(descr, as_json: bool = True) -> webob.Response:
         from viur.core import current, errors
         from viur.core.config import conf
         from viur.core.request import Router
 
         def preprocessor(path: str) -> str:
-            current.request.get().response.headers["Content-Type"] = "application/json"
-            raise errors.BadRequest(descr)
+            if as_json:
+                current.request.get().response.headers["Content-Type"] = "application/json"
+            error = errors.BadRequest()
+            error.descr = descr  # after the constructor, which would turn it into a str
+            raise error
 
         conf.request_preprocessor = preprocessor
-        return Router(webob.Request.blank("/json/x", base_url="https://localhost").environ).response
+        path = "/json/x" if as_json else "/x"
+        return Router(webob.Request.blank(path, base_url="https://localhost").environ).response
 
     def test_status_body_and_handler_survive(self):
         from viur.core.config import conf
@@ -108,11 +112,11 @@ class TestRouterErrorHeader(ViURTestCase):
                 self.assertLessEqual(len(header), _ERROR_HEADER_MAX_LENGTH)
 
     def test_default_body_keeps_the_full_description(self):
-        for descr in ("bad \ud800 here", "ß" * 1500):
+        for descr in ("bad \ud800 here", b"raw bytes", "ß" * 1500):
             with self.subTest(descr=descr[:8]):
                 response = self._request(descr)
                 self.assertEqual(400, response.status_code)
-                self.assertEqual(descr, json.loads(response.body)["descr"])
+                self.assertEqual(str(descr), json.loads(response.body)["descr"])
                 self.assertLessEqual(set(response.headers["x-viur-error"]), PRINTABLE_ASCII)
 
     def test_header_failure_is_not_fatal(self):
@@ -124,3 +128,15 @@ class TestRouterErrorHeader(ViURTestCase):
         self.assertEqual(400, response.status_code)
         self.assertEqual(b"handled", response.body)
         self.assertNotIn("x-viur-error", response.headers)
+
+    def test_html_template_with_surrogate(self):
+        from viur.core.config import conf
+
+        template = types.SimpleNamespace(render=lambda info, nonce=None: f"<p>{info['descr']}</p>")
+        conf.main_app.render = types.SimpleNamespace(
+            getTemplateFileName=lambda *args, **kwargs: "error.html",
+            getEnv=lambda: types.SimpleNamespace(get_template=lambda name: template),
+        )
+        response = self._request("bad \ud800 here", as_json=False)
+        self.assertEqual(400, response.status_code)
+        self.assertEqual(b"<p>bad ? here</p>", response.body)
