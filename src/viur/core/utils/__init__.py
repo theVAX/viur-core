@@ -173,7 +173,11 @@ def build_content_disposition_header(
     # Replace '+' with '%2B' in the ASCII fallback: when this header is embedded
     # as a query parameter in GCS signed URLs, the signing library leaves '+' unencoded
     # while GCS form-decodes '+' as space during verification → SignatureDoesNotMatch.
-    fallback = string.normalize_ascii(filename).replace("+", "%2B")
+    # Only printable ASCII without '"' and '\' in the quoted fallback: a control character (e.g. DEL) makes
+    # the header invalid, and '"' (also from NFKD of a fullwidth quote) would end the quoted string early.
+    fallback = "".join(
+        char for char in string.normalize_ascii(filename) if " " <= char <= "~" and char not in '"\\'
+    ).replace("+", "%2B")
     quoted_utf8 = urllib.parse.quote_from_bytes(filename.encode("utf-8"))
 
     content_disposition = "; ".join(
