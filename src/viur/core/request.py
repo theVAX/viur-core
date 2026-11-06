@@ -469,7 +469,7 @@ class Router:
                         "status": e.status,
                         "reason": e.name,
                         "title": str(translate(e.name)),
-                        "descr": e.descr,
+                        "descr": str(e.descr),  # json.dumps fails on anything else
                     }
                 else:
                     error_info = {
@@ -510,7 +510,7 @@ class Router:
                                f'<title>{error_info["status"]} - {error_info["reason"]}</title>'
                                f'</head><body><h1>{error_info["status"]} - {error_info["reason"]}</h1>')
 
-            self.response.write(res.encode("UTF-8"))
+            self.response.write(res.encode("UTF-8", "replace"))  # A lone surrogate must not break the error page
 
         finally:
             current.session.get().save()
