@@ -252,6 +252,19 @@ class TestBuildContentDisposition(ViURTestCase):
         self.assertNotIn("inline", result)
         self.assertIn('filename="f.pdf"', result)
 
+    def test_fallback_has_no_control_characters(self):
+        from viur.core.utils import build_content_disposition_header
+        result = build_content_disposition_header("x\x7f\t.txt", attachment=True)
+        self.assertEqual("attachment; filename=\"x.txt\"; filename*=UTF-8''x%7F%09.txt", result)
+
+    def test_fallback_cannot_end_the_quoted_string(self):
+        from viur.core.utils import build_content_disposition_header
+        # U+FF02 and U+FF3C become '"' and '\' under NFKD
+        result = build_content_disposition_header("a＂; filename=evil.exe; x=＂＼.txt", attachment=True)
+        fallback = result.split("; filename*=")[0]
+        self.assertEqual('attachment; filename="a; filename=evil.exe; x=.txt"', fallback)
+        self.assertIn("filename*=UTF-8''a%EF%BC%82%3B%20filename%3Devil.exe", result)
+
 
 class TestStringUtils(ViURTestCase):
 
