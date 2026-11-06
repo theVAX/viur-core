@@ -32,9 +32,11 @@ TEMPLATE_STYLE_KEY = "style"
 
 # Printable ASCII except "%" is kept as is in the x-viur-error header; everything else gets percent-encoded.
 _ERROR_HEADER_SAFE = "".join(chr(c) for c in range(0x20, 0x7F) if c != ord("%"))
+# App Engine answers responses with more than 8 KB of headers with a 502; the full description stays in the body.
+_ERROR_HEADER_MAX_LENGTH = 1024
 
 
-def _error_header_value(descr: str) -> str:
+def _error_header_value(descr: t.Any) -> str:
     """
     Turn an exception description into a value for the x-viur-error header.
 
@@ -42,8 +44,19 @@ def _error_header_value(descr: str) -> str:
     then gets a 502 instead of the actual error; control characters would allow header injection. So the
     UTF-8 text is percent-encoded (RFC 3986) except for printable ASCII: an ASCII description without "%"
     stays as is, and ``decodeURIComponent()`` or ``urllib.parse.unquote()`` restores any description.
+
+    A lone surrogate becomes "?". A value longer than ``_ERROR_HEADER_MAX_LENGTH`` is cut between two
+    characters (never inside a %XX sequence or a UTF-8 sequence) and ends with "...".
     """
-    return quote(descr.replace("\n", ""), safe=_ERROR_HEADER_SAFE)
+    text = str(descr).replace("\n", "").encode("utf-8", "replace").decode("utf-8")
+    value = quote(text, safe=_ERROR_HEADER_SAFE)
+    if len(value) <= _ERROR_HEADER_MAX_LENGTH:
+        return value
+    cut = length = 0
+    while length + len(part := quote(text[cut], safe=_ERROR_HEADER_SAFE)) <= _ERROR_HEADER_MAX_LENGTH - 3:
+        length += len(part)
+        cut += 1
+    return value[:length] + "..."
 
 
 class RequestValidator(ABC):
@@ -431,7 +444,10 @@ class Router:
                 self.response.status = f"{e.status} {e.name}"
                 # Set machine-readable x-viur-error response header in case there is an exception description.
                 if e.descr:
-                    self.response.headers["x-viur-error"] = _error_header_value(e.descr)
+                    try:
+                        self.response.headers["x-viur-error"] = _error_header_value(e.descr)
+                    except Exception:  # The header is optional; the error response must still go out
+                        logging.exception("Cannot set the x-viur-error header")
             else:
                 self.response.status = 500
                 logging.error("ViUR has caught an unhandled exception!")
