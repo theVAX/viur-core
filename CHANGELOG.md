@@ -32,6 +32,8 @@ This file documents any relevant changes done to ViUR-core since version 3.
 - [Breaking] feat: `Formmailer` sends in `add`; `canUse()` is `canAdd(skel)`, `onAdded` is `thenAdd`
 - [Breaking] chore: `add_or_edit` is guarded by `canAddOrEdit` instead of `@access("root")`
 - fix: `IN`/`NOT_IN` filter values given as `set`/`frozenset` reach MongoDB as a list (#1786 for MongoDB)
+- perf(file): Signing without a service account key builds the IAM signing credentials once per thread instead of
+  for every signed URL (`File.download`, `cloudfunction_thumbnailer`)
 
 ## [3.9.4]
 

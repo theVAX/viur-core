@@ -13,6 +13,7 @@ import PIL.ImageCms
 import re
 import requests
 import string
+import threading
 import typing as t
 import warnings
 
@@ -60,6 +61,43 @@ _public_bucket = None
 
 # FilePath is a descriptor for ViUR file components
 FilePath = namedtuple("FilePath", ("dlkey", "is_derived", "filename"))
+
+_signing_credentials = threading.local()
+
+
+def _get_signing_credentials() -> "google.auth.compute_engine.IDTokenCredentials":
+    """
+    Returns credentials that sign through the IAM ``signBlob`` API, for when no service account key is available.
+
+    Building them asks the metadata server several times, so they are built once per thread and reused, together
+    with the app's own service account access token; google-auth renews that token when it expires. No two
+    application threads use the same credentials, because google-auth refreshes the token without a lock and
+    ``requests.Session`` is not guaranteed to be thread-safe. No signed URL is kept: every URL is signed on its own.
+    """
+    if (credentials := getattr(_signing_credentials, "credentials", None)) is None:
+        credentials = _signing_credentials.credentials = google.auth.compute_engine.IDTokenCredentials(
+            google.auth.transport.requests.Request(), ""
+        )
+    return credentials
+
+
+def _iam_signed_url(blob: storage.Blob, expiration: datetime.datetime, response_disposition: str | None) -> str:
+    """
+    Returns a V4 signed URL for *blob*, signed with :func:`_get_signing_credentials`.
+
+    If signing fails, the credentials of this thread are dropped before the error is raised: ``iam.Signer`` keeps
+    a token that ``signBlob`` rejected until it expires. The service account the credentials sign as is the one found
+    when they were built; it stays until they are dropped or the thread ends.
+    """
+    try:
+        return blob.generate_signed_url(
+            expiration,
+            credentials=_get_signing_credentials(),
+            response_disposition=response_disposition,
+            version="v4")
+    except Exception:
+        _signing_credentials.__dict__.pop("credentials", None)
+        raise
 
 
 def importBlobFromViur2(dlKey, fileName):
@@ -231,15 +269,9 @@ def cloudfunction_thumbnailer(fileSkel, existingFiles, params):
             if not (blob := bucket.get_blob(path)):
                 logging.warning(f"Blob {path} is missing from cloud storage!")
                 return None
-            authRequest = google.auth.transport.requests.Request()
             expiresAt = datetime.datetime.now() + datetime.timedelta(seconds=60)
-            signing_credentials = google.auth.compute_engine.IDTokenCredentials(authRequest, "")
             content_disposition = utils.build_content_disposition_header(fileSkel["name"])
-            signedUrl = blob.generate_signed_url(
-                expiresAt,
-                credentials=signing_credentials,
-                response_disposition=content_disposition,
-                version="v4")
+            signedUrl = _iam_signed_url(blob, expiresAt, content_disposition)
         return signedUrl
 
     def make_request():
@@ -1133,14 +1165,8 @@ class File(Tree):
                 return blob.download_as_bytes()
 
         # Default fallback - create a signed URL and redirect
-        authRequest = google.auth.transport.requests.Request()
         expiresAt = datetime.datetime.now() + datetime.timedelta(seconds=60)
-        signing_credentials = google.auth.compute_engine.IDTokenCredentials(authRequest, "")
-        signedUrl = blob.generate_signed_url(
-            expiresAt,
-            credentials=signing_credentials,
-            response_disposition=content_disposition,
-            version="v4")
+        signedUrl = _iam_signed_url(blob, expiresAt, content_disposition)
 
         raise errors.Redirect(signedUrl)
 
