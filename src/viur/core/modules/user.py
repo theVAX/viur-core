@@ -748,6 +748,9 @@ class GoogleAccount(UserPrimaryAuthentication):
                 # The address was changed after the lookup; refuse, a new login looks the user up again.
                 raise errors.Forbidden("The e-mail address of this user has changed")
 
+            if not skel["uid"] and not self.may_bind_by_email(skel, user_info):
+                raise errors.Forbidden("This user may not be bound to a Google account by its e-mail address")
+
             skel["uid"] = uid
             take_over(skel)
 
@@ -784,6 +787,16 @@ class GoogleAccount(UserPrimaryAuthentication):
             assert user_skel.write()
 
         return self.next_or_finish(user_skel)
+
+    def may_bind_by_email(self, skel: skeleton.SkeletonInstance, user_info: dict[str, t.Any]) -> bool:
+        """
+        Decides whether a user found by e-mail, not yet bound to a Google account, may be bound to the account of
+        *user_info* (the verified ID token). Runs inside the binding transaction on the freshly read user; changes to
+        *skel* are written together with the binding. Override it to require more than a verified e-mail, e.g. a
+        Workspace token (``hd``) or an invitation: outside Gmail and Workspace, Google's ``email_verified`` does not
+        prove that the person still owns the address. May raise to refuse with an own message.
+        """
+        return True
 
     def canLogin(self, skel: None) -> bool:
         """Access control function for :func:`login`; open to anyone, as the Google token decides."""

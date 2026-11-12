@@ -181,6 +181,48 @@ class TestGoogleLogin(ViURTestCase):
         self.assertEqual(self._logged_in_key(), "jane")
         self.assertEqual(users[0], {"key": "jane", "name": "Jane@Example.com", "sync": False, "uid": "google-sub-1"})
 
+    def test_may_bind_by_email_decides_the_first_binding(self):
+        from viur.core.modules.user import GoogleAccount
+        calls = []
+
+        def refuse(provider, skel, user_info):
+            calls.append((dict(skel), user_info["sub"]))
+            return False
+
+        users = [{"key": "jane", "name": "jane@example.com", "sync": True}]
+        with mock.patch.object(GoogleAccount, "may_bind_by_email", refuse, create=True):
+            self._assert_refused(_token(given_name="Mallory"), users)
+        # asked once, with the freshly read user inside the transaction, and nothing was written
+        self.assertEqual(calls, [({"key": "jane", "name": "jane@example.com", "sync": True}, "google-sub-1")])
+        self.assertEqual(users[0], {"key": "jane", "name": "jane@example.com", "sync": True})
+        self.assertEqual(self.skel.writes, [])
+
+    def test_may_bind_by_email_changes_are_written_with_the_binding(self):
+        from viur.core.modules.user import GoogleAccount
+
+        def allow(provider, skel, user_info):
+            skel["invitation"] = None  # e.g. use up a one-time token in the same transaction
+            return True
+
+        users = [{"key": "jane", "name": "jane@example.com", "sync": False, "invitation": "hash"}]
+        with mock.patch.object(GoogleAccount, "may_bind_by_email", allow, create=True):
+            self._login(_token(), users)
+        self.assertEqual(self._logged_in_key(), "jane")
+        self.assertEqual((users[0]["uid"], users[0]["invitation"]), ("google-sub-1", None))
+        self.assertEqual(self.skel.writes, ["patch"])
+
+    def test_may_bind_by_email_is_not_asked_for_a_bound_user(self):
+        from viur.core.modules.user import GoogleAccount
+        refuse = mock.Mock(return_value=False)
+        with mock.patch.object(GoogleAccount, "may_bind_by_email", refuse, create=True):
+            self._login(_token(), [{"key": "jane", "name": "jane@example.com", "uid": "google-sub-1", "sync": False}])
+        self.assertEqual(self._logged_in_key(), "jane")
+        refuse.assert_not_called()
+
+    def test_may_bind_by_email_allows_by_default(self):
+        from viur.core.modules.user import GoogleAccount
+        self.assertTrue(GoogleAccount.may_bind_by_email(self.provider, FakeRecord(), _token()))
+
     def test_other_google_account_with_same_email_is_refused_after_first_login(self):
         users = [{"key": "jane", "name": "jane@example.com", "sync": True}]
         self._login(_token(), users)  # sub "google-sub-1"
